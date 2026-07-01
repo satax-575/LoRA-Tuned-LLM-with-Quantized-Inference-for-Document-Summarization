@@ -1,0 +1,75 @@
+# ============================================================
+# QLoRA-Tuned Llama 3.1 8B — Document Summarization
+# Full Requirements
+# ============================================================
+
+# --- Core ML ---
+torch>=2.1.0
+torchvision>=0.16.0
+
+# --- Hugging Face Ecosystem ---
+transformers>=4.44.0          # Llama 3.1 support
+accelerate>=0.33.0
+peft>=0.12.0                  # LoRA / QLoRA
+bitsandbytes>=0.43.0          # NF4 4-bit quantization
+datasets>=2.20.0              # CNN/DailyMail, streaming
+huggingface_hub>=0.24.0
+sentencepiece>=0.2.0
+protobuf>=4.24.0
+tokenizers>=0.19.0
+
+# --- AWQ Quantization ---
+autoawq>=0.2.5
+autoawq-kernels>=0.0.6
+
+# --- vLLM High-Throughput Serving ---
+vllm>=0.5.4
+
+# --- FastAPI Inference Backend ---
+fastapi>=0.111.0
+uvicorn[standard]>=0.30.0
+python-multipart>=0.0.9
+httpx>=0.27.0
+starlette>=0.37.2
+
+# --- Redis Caching ---
+redis>=5.0.7
+hiredis>=2.3.2
+
+# --- Evaluation ---
+rouge-score>=0.1.2
+nltk>=3.8.1
+sacrebleu>=2.4.2
+evaluate>=0.4.2
+
+# --- Demo UI ---
+gradio>=4.40.0
+
+# --- Data & Scientific ---
+numpy>=1.26.0
+pandas>=2.1.0
+scipy>=1.13.0
+scikit-learn>=1.4.0
+matplotlib>=3.8.0
+seaborn>=0.13.0
+tqdm>=4.66.0
+
+# --- Config & Utilities ---
+pyyaml>=6.0.1
+python-dotenv>=1.0.1
+rich>=13.7.0
+typer>=0.12.0
+loguru>=0.7.2
+
+# --- Experiment Tracking ---
+wandb>=0.17.0
+tensorboard>=2.17.0
+
+# --- Testing ---
+pytest>=8.2.0
+pytest-asyncio>=0.23.0
+pytest-cov>=5.0.0
+
+# --- Type Hints ---
+pydantic>=2.7.0
+pydantic-settings>=2.3.0

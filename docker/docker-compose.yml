@@ -1,0 +1,77 @@
+# ============================================================
+# Docker Compose — QLoRA Llama 3.1 8B Production Stack
+# Services: FastAPI Inference API + Redis Cache
+# ============================================================
+
+version: "3.9"
+
+services:
+
+  # ── Redis Cache ──────────────────────────────────────────
+  redis:
+    image: redis:7.2-alpine
+    container_name: qlora-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes --maxmemory 2gb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - qlora-network
+
+  # ── FastAPI Inference API ────────────────────────────────
+  api:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: qlora-api
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - HF_TOKEN=${HF_TOKEN}
+      - REDIS_URL=redis://redis:6379
+      - REDIS_TTL=3600
+      - AWQ_MODEL_DIR=/models/awq_model
+      - API_HOST=0.0.0.0
+      - API_PORT=8000
+      - LOG_LEVEL=info
+      - CUDA_VISIBLE_DEVICES=0
+      - WANDB_DISABLED=true
+    volumes:
+      - ../outputs:/app/outputs
+      - model-cache:/models
+    depends_on:
+      redis:
+        condition: service_healthy
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    networks:
+      - qlora-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 15s
+      start_period: 120s
+      retries: 3
+
+# ── Volumes ──────────────────────────────────────────────
+volumes:
+  redis-data:
+  model-cache:
+
+# ── Networks ─────────────────────────────────────────────
+networks:
+  qlora-network:
+    driver: bridge

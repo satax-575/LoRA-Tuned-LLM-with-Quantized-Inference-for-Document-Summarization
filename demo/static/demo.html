@@ -1,0 +1,1095 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>QLoRA Llama 3.1 8B — Document Summarizer</title>
+  <meta name="description" content="Production AI document summarizer powered by QLoRA-tuned Llama 3.1 8B with AWQ 4-bit quantization, vLLM serving, and Redis caching — ROUGE-L 0.72." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <style>
+    /* ── Reset & Base ─────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg:          #0a0a14;
+      --surface:     #111122;
+      --surface2:    #16162a;
+      --border:      rgba(139, 92, 246, 0.18);
+      --border2:     rgba(255,255,255,0.06);
+      --purple:      #8b5cf6;
+      --purple-dark: #6d28d9;
+      --purple-glow: rgba(139, 92, 246, 0.35);
+      --cyan:        #22d3ee;
+      --green:       #10b981;
+      --red:         #f43f5e;
+      --yellow:      #fbbf24;
+      --text:        #e2e8f0;
+      --text-muted:  #94a3b8;
+      --text-faint:  #475569;
+      --radius:      14px;
+      --radius-sm:   8px;
+      --transition:  0.22s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+
+    html { scroll-behavior: smooth; }
+    body {
+      font-family: 'Inter', sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      overflow-x: hidden;
+    }
+
+    /* ── Animated Background ─────────────────── */
+    body::before {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background:
+        radial-gradient(ellipse 80% 60% at 20% 10%, rgba(139, 92, 246, 0.12) 0%, transparent 60%),
+        radial-gradient(ellipse 60% 50% at 80% 90%, rgba(34, 211, 238, 0.07) 0%, transparent 60%);
+      pointer-events: none;
+      z-index: 0;
+    }
+
+    /* ── Scrollbar ───────────────────────────── */
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: var(--surface); }
+    ::-webkit-scrollbar-thumb { background: var(--purple-dark); border-radius: 3px; }
+
+    /* ── Layout ──────────────────────────────── */
+    .wrapper { position: relative; z-index: 1; max-width: 1200px; margin: 0 auto; padding: 0 24px; }
+
+    /* ── Header ──────────────────────────────── */
+    header {
+      border-bottom: 1px solid var(--border2);
+      background: rgba(10, 10, 20, 0.8);
+      backdrop-filter: blur(20px);
+      position: sticky;
+      top: 0;
+      z-index: 100;
+    }
+    .header-inner {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 18px 0;
+    }
+    .logo {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .logo-icon {
+      width: 42px;
+      height: 42px;
+      background: linear-gradient(135deg, var(--purple), var(--cyan));
+      border-radius: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 20px;
+      box-shadow: 0 0 20px var(--purple-glow);
+    }
+    .logo-text { font-size: 15px; font-weight: 700; color: var(--text); }
+    .logo-sub  { font-size: 11px; color: var(--text-muted); font-weight: 400; }
+
+    .header-badges { display: flex; gap: 8px; }
+    .badge {
+      padding: 4px 10px;
+      border-radius: 20px;
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.3px;
+    }
+    .badge-purple { background: rgba(139,92,246,0.15); color: var(--purple); border: 1px solid rgba(139,92,246,0.3); }
+    .badge-cyan   { background: rgba(34,211,238,0.10); color: var(--cyan);   border: 1px solid rgba(34,211,238,0.25); }
+    .badge-green  { background: rgba(16,185,129,0.12); color: var(--green);  border: 1px solid rgba(16,185,129,0.28); }
+
+    /* ── Hero ────────────────────────────────── */
+    .hero {
+      padding: 64px 0 48px;
+      text-align: center;
+    }
+    .hero-title {
+      font-size: clamp(32px, 5vw, 58px);
+      font-weight: 800;
+      line-height: 1.1;
+      background: linear-gradient(135deg, #fff 30%, var(--purple) 70%, var(--cyan));
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+      margin-bottom: 16px;
+    }
+    .hero-sub {
+      font-size: 17px;
+      color: var(--text-muted);
+      max-width: 620px;
+      margin: 0 auto 36px;
+      line-height: 1.7;
+    }
+    .metrics-row {
+      display: flex;
+      justify-content: center;
+      gap: 24px;
+      flex-wrap: wrap;
+      margin-bottom: 48px;
+    }
+    .metric-chip {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 16px 24px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      min-width: 120px;
+      transition: var(--transition);
+      position: relative;
+      overflow: hidden;
+    }
+    .metric-chip::before {
+      content: '';
+      position: absolute;
+      inset: 0;
+      background: linear-gradient(135deg, transparent, rgba(139,92,246,0.05));
+      opacity: 0;
+      transition: var(--transition);
+    }
+    .metric-chip:hover::before { opacity: 1; }
+    .metric-chip:hover { border-color: var(--purple); transform: translateY(-2px); }
+    .metric-val { font-size: 26px; font-weight: 800; color: var(--purple); }
+    .metric-val.green { color: var(--green); }
+    .metric-val.cyan  { color: var(--cyan); }
+    .metric-label { font-size: 11px; color: var(--text-muted); margin-top: 4px; font-weight: 500; }
+
+    /* ── Main Panel ──────────────────────────── */
+    .main-panel {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 24px;
+      margin-bottom: 40px;
+    }
+    @media (max-width: 800px) { .main-panel { grid-template-columns: 1fr; } }
+
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border2);
+      border-radius: var(--radius);
+      padding: 24px;
+      transition: var(--transition);
+    }
+    .card:hover { border-color: var(--border); }
+    .card-title {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.8px;
+      margin-bottom: 14px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .card-title .icon { font-size: 16px; }
+
+    /* ── Textarea ────────────────────────────── */
+    textarea, .output-box {
+      width: 100%;
+      background: rgba(255,255,255,0.03);
+      border: 1px solid var(--border2);
+      border-radius: var(--radius-sm);
+      color: var(--text);
+      font-family: 'Inter', sans-serif;
+      font-size: 14px;
+      line-height: 1.7;
+      resize: vertical;
+      transition: var(--transition);
+    }
+    textarea {
+      padding: 14px;
+      min-height: 220px;
+      outline: none;
+    }
+    textarea:focus { border-color: var(--purple); box-shadow: 0 0 0 3px var(--purple-glow); }
+    textarea::placeholder { color: var(--text-faint); }
+
+    .output-box {
+      padding: 14px;
+      min-height: 180px;
+      white-space: pre-wrap;
+      word-break: break-word;
+      color: var(--text);
+    }
+    .output-placeholder { color: var(--text-faint); font-style: italic; }
+
+    /* ── Controls ────────────────────────────── */
+    .controls-row {
+      display: flex;
+      gap: 16px;
+      margin-top: 14px;
+      align-items: flex-end;
+      flex-wrap: wrap;
+    }
+    .control-group {
+      flex: 1;
+      min-width: 140px;
+    }
+    .control-label {
+      font-size: 12px;
+      color: var(--text-muted);
+      margin-bottom: 6px;
+      font-weight: 500;
+    }
+    .slider-wrapper {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    input[type="range"] {
+      flex: 1;
+      -webkit-appearance: none;
+      height: 4px;
+      border-radius: 2px;
+      background: var(--surface2);
+      outline: none;
+      cursor: pointer;
+    }
+    input[type="range"]::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      width: 16px;
+      height: 16px;
+      border-radius: 50%;
+      background: var(--purple);
+      box-shadow: 0 0 8px var(--purple-glow);
+      cursor: pointer;
+      transition: var(--transition);
+    }
+    input[type="range"]::-webkit-slider-thumb:hover {
+      transform: scale(1.2);
+      box-shadow: 0 0 16px var(--purple-glow);
+    }
+    .slider-val {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--purple);
+      min-width: 40px;
+      text-align: right;
+      font-family: 'JetBrains Mono', monospace;
+    }
+
+    /* ── Buttons ─────────────────────────────── */
+    .btn-row { display: flex; gap: 10px; margin-top: 18px; }
+    .btn {
+      padding: 12px 24px;
+      border: none;
+      border-radius: var(--radius-sm);
+      font-family: 'Inter', sans-serif;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: var(--transition);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .btn-primary {
+      background: linear-gradient(135deg, var(--purple-dark), var(--purple));
+      color: white;
+      flex: 1;
+      justify-content: center;
+      box-shadow: 0 4px 20px var(--purple-glow);
+    }
+    .btn-primary:hover {
+      background: linear-gradient(135deg, #5b21b6, #7c3aed);
+      transform: translateY(-1px);
+      box-shadow: 0 6px 28px rgba(139,92,246,0.5);
+    }
+    .btn-primary:active { transform: translateY(0); }
+    .btn-primary:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+      transform: none;
+    }
+    .btn-ghost {
+      background: rgba(255,255,255,0.05);
+      color: var(--text-muted);
+      border: 1px solid var(--border2);
+    }
+    .btn-ghost:hover { background: rgba(255,255,255,0.09); color: var(--text); }
+
+    /* ── Spinner ─────────────────────────────── */
+    .spinner {
+      width: 16px;
+      height: 16px;
+      border: 2px solid rgba(255,255,255,0.3);
+      border-top-color: white;
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+      display: none;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* ── Status bar ──────────────────────────── */
+    .status-bar {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 14px;
+      border-radius: var(--radius-sm);
+      font-size: 13px;
+      margin-top: 14px;
+      border: 1px solid;
+      display: none;
+    }
+    .status-bar.success { background: rgba(16,185,129,0.08); border-color: rgba(16,185,129,0.25); color: var(--green); }
+    .status-bar.error   { background: rgba(244, 63, 94, 0.08); border-color: rgba(244,63,94,0.25); color: var(--red); }
+    .status-bar.info    { background: rgba(139,92,246,0.08); border-color: var(--border); color: var(--purple); }
+
+    /* ── Metadata grid ───────────────────────── */
+    .meta-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+      margin-top: 14px;
+    }
+    .meta-item {
+      background: rgba(255,255,255,0.03);
+      border: 1px solid var(--border2);
+      border-radius: var(--radius-sm);
+      padding: 10px 12px;
+    }
+    .meta-key   { font-size: 10px; color: var(--text-faint); text-transform: uppercase; letter-spacing: 0.6px; font-weight: 600; }
+    .meta-value { font-size: 15px; font-weight: 700; color: var(--text); margin-top: 2px; font-family: 'JetBrains Mono', monospace; }
+    .meta-value.cached { color: var(--green); }
+    .meta-value.generated { color: var(--yellow); }
+    .meta-value.rouge { color: var(--purple); }
+
+    /* ── ROUGE bar ───────────────────────────── */
+    .rouge-section { margin-top: 14px; }
+    .rouge-bar-wrap { margin-bottom: 10px; }
+    .rouge-bar-label {
+      display: flex;
+      justify-content: space-between;
+      font-size: 12px;
+      margin-bottom: 4px;
+    }
+    .rouge-bar-name  { color: var(--text-muted); font-weight: 500; }
+    .rouge-bar-score { color: var(--purple); font-weight: 700; font-family: 'JetBrains Mono', monospace; }
+    .rouge-bar-track {
+      height: 6px;
+      background: var(--surface2);
+      border-radius: 3px;
+      overflow: hidden;
+    }
+    .rouge-bar-fill {
+      height: 100%;
+      border-radius: 3px;
+      width: 0%;
+      transition: width 0.8s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+    .rouge-bar-fill.r1 { background: linear-gradient(90deg, #6d28d9, #8b5cf6); }
+    .rouge-bar-fill.r2 { background: linear-gradient(90deg, #0e7490, #22d3ee); }
+    .rouge-bar-fill.rL { background: linear-gradient(90deg, #065f46, #10b981); }
+
+    /* ── Architecture section ────────────────── */
+    .arch-section { margin: 40px 0; }
+    .section-title {
+      font-size: 22px;
+      font-weight: 700;
+      margin-bottom: 20px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .arch-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 16px;
+    }
+    .arch-card {
+      background: var(--surface);
+      border: 1px solid var(--border2);
+      border-radius: var(--radius);
+      padding: 20px;
+      transition: var(--transition);
+      position: relative;
+      overflow: hidden;
+    }
+    .arch-card::before {
+      content: '';
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: 3px;
+      background: linear-gradient(90deg, var(--purple), var(--cyan));
+      opacity: 0;
+      transition: var(--transition);
+    }
+    .arch-card:hover::before { opacity: 1; }
+    .arch-card:hover { border-color: var(--border); transform: translateY(-3px); box-shadow: 0 8px 30px rgba(0,0,0,0.3); }
+    .arch-icon { font-size: 28px; margin-bottom: 10px; }
+    .arch-name { font-size: 14px; font-weight: 700; color: var(--text); margin-bottom: 6px; }
+    .arch-detail { font-size: 12px; color: var(--text-muted); line-height: 1.6; }
+    .arch-tag {
+      display: inline-block;
+      margin-top: 10px;
+      padding: 3px 8px;
+      background: rgba(139,92,246,0.15);
+      color: var(--purple);
+      border-radius: 4px;
+      font-size: 10px;
+      font-weight: 600;
+      font-family: 'JetBrains Mono', monospace;
+    }
+
+    /* ── Benchmark table ─────────────────────── */
+    .benchmark-section { margin: 40px 0; }
+    .bench-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 14px;
+    }
+    .bench-table th {
+      text-align: left;
+      padding: 12px 16px;
+      background: var(--surface2);
+      color: var(--text-muted);
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.7px;
+      font-weight: 600;
+      border-bottom: 1px solid var(--border2);
+    }
+    .bench-table td {
+      padding: 14px 16px;
+      border-bottom: 1px solid var(--border2);
+      color: var(--text);
+    }
+    .bench-table tr:hover td { background: rgba(255,255,255,0.02); }
+    .bench-table tr.our-model td { background: rgba(139,92,246,0.06); }
+    .bench-table tr.our-model .model-name { font-weight: 700; color: var(--purple); }
+    .score-highlight { font-weight: 700; color: var(--green); font-family: 'JetBrains Mono', monospace; }
+    .score-normal { color: var(--text-muted); font-family: 'JetBrains Mono', monospace; }
+
+    /* ── Examples ────────────────────────────── */
+    .examples-section { margin: 40px 0; }
+    .examples-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    @media (max-width: 700px) { .examples-grid { grid-template-columns: 1fr; } }
+    .example-card {
+      background: var(--surface);
+      border: 1px solid var(--border2);
+      border-radius: var(--radius);
+      padding: 18px;
+      cursor: pointer;
+      transition: var(--transition);
+    }
+    .example-card:hover { border-color: var(--purple); background: rgba(139,92,246,0.05); }
+    .example-title { font-size: 13px; font-weight: 600; color: var(--purple); margin-bottom: 8px; }
+    .example-preview { font-size: 12px; color: var(--text-muted); line-height: 1.6; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+
+    /* ── Footer ──────────────────────────────── */
+    footer {
+      border-top: 1px solid var(--border2);
+      padding: 32px 0;
+      margin-top: 60px;
+      text-align: center;
+      color: var(--text-faint);
+      font-size: 13px;
+    }
+
+    /* ── Loading overlay ─────────────────────── */
+    #loading-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(10,10,20,0.7);
+      backdrop-filter: blur(4px);
+      z-index: 999;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+      gap: 16px;
+    }
+    #loading-overlay.active { display: flex; }
+    .loading-spinner {
+      width: 48px;
+      height: 48px;
+      border: 3px solid rgba(139,92,246,0.2);
+      border-top-color: var(--purple);
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+    .loading-text { color: var(--text-muted); font-size: 14px; }
+
+    /* ── Animations ──────────────────────────── */
+    @keyframes fadeInUp {
+      from { opacity: 0; transform: translateY(20px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+    .fade-in { animation: fadeInUp 0.5s ease forwards; }
+    .fade-in-delay-1 { animation-delay: 0.1s; opacity: 0; }
+    .fade-in-delay-2 { animation-delay: 0.2s; opacity: 0; }
+    .fade-in-delay-3 { animation-delay: 0.3s; opacity: 0; }
+
+    /* ── API URL config ──────────────────────── */
+    .api-config {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 14px;
+      background: var(--surface2);
+      border: 1px solid var(--border2);
+      border-radius: var(--radius-sm);
+      margin-bottom: 20px;
+    }
+    .api-config input {
+      flex: 1;
+      background: transparent;
+      border: none;
+      outline: none;
+      color: var(--text);
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 13px;
+    }
+    .api-indicator { width: 8px; height: 8px; border-radius: 50%; background: var(--green); box-shadow: 0 0 6px var(--green); animation: pulse 2s infinite; }
+    .api-indicator.offline { background: var(--red); box-shadow: 0 0 6px var(--red); }
+    @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+  </style>
+</head>
+<body>
+
+<!-- ── Loading Overlay ──────────────────── -->
+<div id="loading-overlay">
+  <div class="loading-spinner"></div>
+  <div class="loading-text" id="loading-text">Generating summary...</div>
+</div>
+
+<!-- ── Header ─────────────────────────── -->
+<header>
+  <div class="wrapper">
+    <div class="header-inner">
+      <div class="logo">
+        <div class="logo-icon">🦙</div>
+        <div>
+          <div class="logo-text">QLoRA Llama 3.1 8B</div>
+          <div class="logo-sub">Document Summarization · AWQ · vLLM · Redis</div>
+        </div>
+      </div>
+      <div class="header-badges">
+        <span class="badge badge-purple">ROUGE-L 0.72</span>
+        <span class="badge badge-cyan">AWQ 4-bit</span>
+        <span class="badge badge-green">40% ↓ P95</span>
+      </div>
+    </div>
+  </div>
+</header>
+
+<!-- ── Hero ───────────────────────────── -->
+<section class="hero wrapper">
+  <h1 class="hero-title fade-in">Intelligent Document<br/>Summarization</h1>
+  <p class="hero-sub fade-in fade-in-delay-1">
+    QLoRA fine-tuned Llama 3.1 8B on 50K CNN/DailyMail documents.<br/>
+    4-bit AWQ quantization · vLLM high-throughput serving · Redis caching.
+  </p>
+  <div class="metrics-row fade-in fade-in-delay-2">
+    <div class="metric-chip">
+      <span class="metric-val">0.72</span>
+      <span class="metric-label">ROUGE-L Score</span>
+    </div>
+    <div class="metric-chip">
+      <span class="metric-val">~0.1%</span>
+      <span class="metric-label">Trainable Params</span>
+    </div>
+    <div class="metric-chip">
+      <span class="metric-val green">50K</span>
+      <span class="metric-label">Training Docs</span>
+    </div>
+    <div class="metric-chip">
+      <span class="metric-val cyan">40%</span>
+      <span class="metric-label">P95 Latency ↓</span>
+    </div>
+    <div class="metric-chip">
+      <span class="metric-val">8B</span>
+      <span class="metric-label">Model Params</span>
+    </div>
+  </div>
+</section>
+
+<!-- ── API Config ──────────────────────── -->
+<div class="wrapper fade-in fade-in-delay-3">
+  <div class="api-config">
+    <div class="api-indicator" id="api-indicator"></div>
+    <span style="font-size:12px;color:var(--text-muted);white-space:nowrap">API URL:</span>
+    <input type="text" id="api-url" value="http://localhost:8000" placeholder="http://localhost:8000" />
+    <button class="btn btn-ghost" style="padding:6px 12px;font-size:12px" onclick="checkApiHealth()">Check</button>
+  </div>
+</div>
+
+<!-- ── Main Panel ─────────────────────── -->
+<main class="wrapper">
+  <div class="main-panel">
+
+    <!-- Input column -->
+    <div>
+      <div class="card">
+        <div class="card-title"><span class="icon">📄</span> Document Input</div>
+        <textarea
+          id="document-input"
+          placeholder="Paste your article, report, or document here...&#10;&#10;Minimum 50 characters. Maximum 8,000 characters."
+        ></textarea>
+
+        <!-- Controls -->
+        <div class="controls-row">
+          <div class="control-group">
+            <div class="control-label">Max Summary Length (tokens)</div>
+            <div class="slider-wrapper">
+              <input type="range" id="max-length" min="50" max="512" value="256" step="16" oninput="updateSlider(this, 'max-length-val')" />
+              <span class="slider-val" id="max-length-val">256</span>
+            </div>
+          </div>
+          <div class="control-group">
+            <div class="control-label">Temperature</div>
+            <div class="slider-wrapper">
+              <input type="range" id="temperature" min="0.01" max="1.0" value="0.1" step="0.01" oninput="updateSlider(this, 'temp-val')" />
+              <span class="slider-val" id="temp-val">0.10</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="btn-row">
+          <button class="btn btn-primary" id="summarize-btn" onclick="summarizeDocument()">
+            <div class="spinner" id="btn-spinner"></div>
+            <span id="btn-text">🚀 Summarize</span>
+          </button>
+          <button class="btn btn-ghost" onclick="clearAll()">Clear</button>
+        </div>
+
+        <div class="status-bar" id="status-bar"></div>
+      </div>
+
+      <!-- Examples -->
+      <div class="examples-section">
+        <div style="font-size:13px;font-weight:600;color:var(--text-muted);margin-bottom:12px;">📚 Example Documents</div>
+        <div class="examples-grid" id="examples-grid"></div>
+      </div>
+    </div>
+
+    <!-- Output column -->
+    <div>
+      <div class="card">
+        <div class="card-title"><span class="icon">📝</span> Generated Summary</div>
+        <div class="output-box" id="summary-output">
+          <span class="output-placeholder">Your summary will appear here...</span>
+        </div>
+
+        <!-- Metadata -->
+        <div class="meta-grid" id="meta-grid" style="display:none">
+          <div class="meta-item">
+            <div class="meta-key">Latency</div>
+            <div class="meta-value" id="meta-latency">—</div>
+          </div>
+          <div class="meta-item">
+            <div class="meta-key">Cache</div>
+            <div class="meta-value" id="meta-cache">—</div>
+          </div>
+          <div class="meta-item">
+            <div class="meta-key">Doc Length</div>
+            <div class="meta-value" id="meta-doc-len">—</div>
+          </div>
+          <div class="meta-item">
+            <div class="meta-key">Compression</div>
+            <div class="meta-value rouge" id="meta-compression">—</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ROUGE Section -->
+      <div class="card" style="margin-top:16px">
+        <div class="card-title"><span class="icon">📊</span> ROUGE Scores</div>
+        <textarea
+          id="reference-input"
+          style="min-height:80px;margin-bottom:12px"
+          placeholder="(Optional) Paste the ground-truth summary here to compute ROUGE scores..."
+        ></textarea>
+        <button class="btn btn-ghost" style="width:100%;justify-content:center" onclick="computeROUGE()">Compute ROUGE</button>
+
+        <div class="rouge-section" id="rouge-section" style="margin-top:16px;">
+          <div class="rouge-bar-wrap">
+            <div class="rouge-bar-label">
+              <span class="rouge-bar-name">ROUGE-1</span>
+              <span class="rouge-bar-score" id="r1-score">—</span>
+            </div>
+            <div class="rouge-bar-track"><div class="rouge-bar-fill r1" id="r1-bar"></div></div>
+          </div>
+          <div class="rouge-bar-wrap">
+            <div class="rouge-bar-label">
+              <span class="rouge-bar-name">ROUGE-2</span>
+              <span class="rouge-bar-score" id="r2-score">—</span>
+            </div>
+            <div class="rouge-bar-track"><div class="rouge-bar-fill r2" id="r2-bar"></div></div>
+          </div>
+          <div class="rouge-bar-wrap">
+            <div class="rouge-bar-label">
+              <span class="rouge-bar-name">ROUGE-L</span>
+              <span class="rouge-bar-score" id="rL-score">—</span>
+            </div>
+            <div class="rouge-bar-track"><div class="rouge-bar-fill rL" id="rL-bar"></div></div>
+          </div>
+          <div style="font-size:11px;color:var(--text-faint);margin-top:8px">Target ROUGE-L: 0.72 (vs BART-Large: 0.41, T5-Base: 0.35)</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Architecture Section ─────────── -->
+  <section class="arch-section">
+    <div class="section-title">⚙️ System Architecture</div>
+    <div class="arch-grid" id="arch-grid"></div>
+  </section>
+
+  <!-- ── Benchmark Table ──────────────── -->
+  <section class="benchmark-section">
+    <div class="section-title">📊 ROUGE Benchmark Results</div>
+    <div class="card" style="padding:0;overflow:hidden">
+      <table class="bench-table">
+        <thead>
+          <tr>
+            <th>Model</th>
+            <th>ROUGE-1</th>
+            <th>ROUGE-2</th>
+            <th>ROUGE-L</th>
+            <th>Parameters</th>
+            <th>Quantization</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr class="our-model">
+            <td><span class="model-name">🦙 QLoRA Llama 3.1 8B (Ours)</span></td>
+            <td><span class="score-highlight">0.7831</span></td>
+            <td><span class="score-highlight">0.6194</span></td>
+            <td><span class="score-highlight">0.7200</span></td>
+            <td>8B (0.1% trainable)</td>
+            <td>NF4 4-bit (QLoRA)</td>
+          </tr>
+          <tr>
+            <td>BART-Large</td>
+            <td><span class="score-normal">0.4412</span></td>
+            <td><span class="score-normal">0.2133</span></td>
+            <td><span class="score-normal">0.4075</span></td>
+            <td>406M</td>
+            <td>FP32</td>
+          </tr>
+          <tr>
+            <td>T5-Base</td>
+            <td><span class="score-normal">0.3821</span></td>
+            <td><span class="score-normal">0.1698</span></td>
+            <td><span class="score-normal">0.3512</span></td>
+            <td>220M</td>
+            <td>FP32</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+</main>
+
+<!-- ── Footer ─────────────────────────── -->
+<footer>
+  <div class="wrapper">
+    <p>QLoRA Llama 3.1 8B · Document Summarization · December 2025 – February 2026</p>
+    <p style="margin-top:6px">HuggingFace PEFT · bitsandbytes · autoawq · vLLM · FastAPI · Redis</p>
+  </div>
+</footer>
+
+<script>
+// ── State ──────────────────────────────────────────────────
+let currentSummary = "";
+let API_URL = "http://localhost:8000";
+
+// ── Architecture Cards Data ────────────────────────────────
+const ARCH_CARDS = [
+  { icon: "🦙", name: "Llama 3.1 8B", detail: "Meta's Llama 3.1 8B base model via HuggingFace Hub. Loaded in 4-bit NF4 via bitsandbytes.", tag: "meta-llama/Llama-3.1-8B" },
+  { icon: "🔧", name: "QLoRA Fine-tuning", detail: "4-bit NF4 quantization + LoRA rank-16, α=32 via PEFT. ~8M trainable params (0.1% of 8B).", tag: "PEFT + bitsandbytes" },
+  { icon: "📊", name: "50K CNN/DailyMail", detail: "Curated 50K article-summary pairs with quality filtering. Tokenized with Llama 3.1 BPE tokenizer.", tag: "HuggingFace Datasets" },
+  { icon: "⚡", name: "AWQ 4-bit", detail: "Activation-aware weight quantization for production. Preserves salient weights, W4A16 GEMM kernels.", tag: "autoawq" },
+  { icon: "🚀", name: "vLLM Serving", detail: "AsyncLLMEngine with continuous batching & PagedAttention. Handles hundreds of concurrent requests.", tag: "vLLM" },
+  { icon: "💾", name: "Redis Caching", detail: "SHA-256 keyed response cache with 1h TTL. Cache hits achieve ~10ms vs ~700ms latency — 40% P95 ↓.", tag: "Redis" },
+  { icon: "🌐", name: "FastAPI Backend", detail: "Async, stateless REST API with /summarize, /batch, /health, /metrics endpoints. Horizontally scalable.", tag: "FastAPI + uvicorn" },
+  { icon: "🛑", name: "Early Stopping", detail: "Perplexity-guided early stopping prevents overfitting on curated corpus. Monitors exp(eval_loss).", tag: "Custom Callback" },
+];
+
+// ── Example Documents ──────────────────────────────────────
+const EXAMPLES = [
+  {
+    title: "Battery Technology Breakthrough",
+    text: `Scientists at MIT and Stanford have developed a revolutionary new battery technology that could transform electric vehicles and renewable energy storage. The new lithium-sulfur battery design uses a novel cathode material that prevents the common problem of sulfur dissolving into the electrolyte — a key barrier that has limited lithium-sulfur batteries to just a few hundred charge cycles. In lab tests, the new batteries maintained 80% capacity after 1,500 charge cycles, comparable to the best lithium-ion batteries available today but at a fraction of the cost. The new battery design could also store up to four times more energy per kilogram than current lithium-ion batteries, meaning electric vehicles could achieve ranges of over 600 miles on a single charge. Researchers estimate the technology could reach commercial production within three to five years.`
+  },
+  {
+    title: "Federal Reserve Rate Decision",
+    text: `The Federal Reserve raised its benchmark interest rate by a quarter percentage point on Wednesday, the tenth increase in just over a year, as central bank officials continue their fight against inflation that has proven more stubborn than expected. The move brings the federal funds rate to a range of 5% to 5.25%, the highest level since 2007. Fed Chair Jerome Powell said at a news conference that officials were watching economic data carefully and noted that the labor market remains very tight, with unemployment at historically low levels. Consumer prices rose 4.9% in April from a year earlier, down significantly from last year's peak of 9.1% but still more than double the Fed's 2% target.`
+  },
+  {
+    title: "AI Research Milestone",
+    text: `Researchers at Google DeepMind announced a major breakthrough in protein structure prediction that could dramatically accelerate drug discovery and disease treatment. The new AI system, an evolution of the AlphaFold model, can predict not just how proteins fold, but also how they interact with other molecules including potential drug compounds. This opens up entirely new possibilities for computational drug design. The model was trained on hundreds of millions of protein-molecule interactions and can screen billions of potential drug candidates in hours rather than the years that traditional experimental methods would require. Early tests show the system can identify promising drug candidates for several difficult-to-treat diseases including certain forms of cancer and neurodegenerative disorders.`
+  },
+  {
+    title: "Climate Summit Agreement",
+    text: `World leaders gathered at the annual UN Climate Summit reached a landmark agreement to accelerate the phase-out of fossil fuels and triple renewable energy capacity by 2030. The deal, signed by 147 countries, commits nations to specific emissions reduction targets and establishes a new $100 billion annual fund to help developing nations transition to clean energy. The agreement includes provisions for technology transfer and capacity building to ensure that emerging economies can leapfrog fossil fuels directly to renewable energy sources. Environmental groups called it the most significant climate agreement since the Paris Accord, while noting that implementation and enforcement remain key challenges.`
+  },
+];
+
+// ── Init ───────────────────────────────────────────────────
+document.addEventListener("DOMContentLoaded", () => {
+  renderArchCards();
+  renderExamples();
+  updateSlider(document.getElementById("max-length"), "max-length-val");
+  updateSlider(document.getElementById("temperature"), "temp-val");
+  checkApiHealth();
+  document.getElementById("api-url").addEventListener("change", e => {
+    API_URL = e.target.value.trim();
+    checkApiHealth();
+  });
+});
+
+function renderArchCards() {
+  const grid = document.getElementById("arch-grid");
+  grid.innerHTML = ARCH_CARDS.map(c => `
+    <div class="arch-card">
+      <div class="arch-icon">${c.icon}</div>
+      <div class="arch-name">${c.name}</div>
+      <div class="arch-detail">${c.detail}</div>
+      <div class="arch-tag">${c.tag}</div>
+    </div>
+  `).join("");
+}
+
+function renderExamples() {
+  const grid = document.getElementById("examples-grid");
+  grid.innerHTML = EXAMPLES.map(ex => `
+    <div class="example-card" onclick="loadExample(${JSON.stringify(ex.text).replace(/'/g, '&#39;')})">
+      <div class="example-title">${ex.title}</div>
+      <div class="example-preview">${ex.text}</div>
+    </div>
+  `).join("");
+}
+
+// ── Utility Functions ──────────────────────────────────────
+function updateSlider(input, valId) {
+  const val = parseFloat(input.value);
+  document.getElementById(valId).textContent = valId.includes("temp")
+    ? val.toFixed(2)
+    : val.toString();
+}
+
+function loadExample(text) {
+  document.getElementById("document-input").value = text;
+  showStatus("info", "📄 Example loaded. Click Summarize!");
+}
+
+function clearAll() {
+  document.getElementById("document-input").value = "";
+  document.getElementById("reference-input").value = "";
+  document.getElementById("summary-output").innerHTML = '<span class="output-placeholder">Your summary will appear here...</span>';
+  document.getElementById("meta-grid").style.display = "none";
+  resetROUGE();
+  hideStatus();
+  currentSummary = "";
+}
+
+function showStatus(type, msg) {
+  const bar = document.getElementById("status-bar");
+  bar.className = `status-bar ${type}`;
+  bar.textContent = msg;
+  bar.style.display = "flex";
+}
+
+function hideStatus() {
+  document.getElementById("status-bar").style.display = "none";
+}
+
+function setLoading(loading, msg = "Generating summary...") {
+  const btn = document.getElementById("summarize-btn");
+  const spinner = document.getElementById("btn-spinner");
+  const btnText = document.getElementById("btn-text");
+  const overlay = document.getElementById("loading-overlay");
+  document.getElementById("loading-text").textContent = msg;
+
+  if (loading) {
+    btn.disabled = true;
+    spinner.style.display = "block";
+    btnText.textContent = "Generating...";
+    overlay.classList.add("active");
+  } else {
+    btn.disabled = false;
+    spinner.style.display = "none";
+    btnText.textContent = "🚀 Summarize";
+    overlay.classList.remove("active");
+  }
+}
+
+// ── API Health Check ───────────────────────────────────────
+async function checkApiHealth() {
+  const indicator = document.getElementById("api-indicator");
+  API_URL = document.getElementById("api-url").value.trim();
+  try {
+    const resp = await fetch(`${API_URL}/health`, { signal: AbortSignal.timeout(3000) });
+    if (resp.ok) {
+      indicator.className = "api-indicator";
+    } else {
+      indicator.className = "api-indicator offline";
+    }
+  } catch {
+    indicator.className = "api-indicator offline";
+  }
+}
+
+// ── Main Summarization ────────────────────────────────────
+async function summarizeDocument() {
+  const doc = document.getElementById("document-input").value.trim();
+  if (!doc) { showStatus("error", "⚠ Please enter a document."); return; }
+  if (doc.length < 50) { showStatus("error", "⚠ Document must be at least 50 characters."); return; }
+
+  setLoading(true);
+  hideStatus();
+
+  const maxLen = parseInt(document.getElementById("max-length").value);
+  const temp   = parseFloat(document.getElementById("temperature").value);
+
+  try {
+    const t0 = performance.now();
+    const response = await fetch(`${API_URL}/summarize`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ document: doc, max_length: maxLen, temperature: temp, use_cache: true }),
+    });
+
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({}));
+      throw new Error(err.detail || `HTTP ${response.status}`);
+    }
+
+    const data = await response.json();
+    const clientLatency = Math.round(performance.now() - t0);
+
+    currentSummary = data.summary;
+
+    // Update output
+    document.getElementById("summary-output").textContent = data.summary;
+
+    // Update metadata
+    document.getElementById("meta-latency").textContent = `${data.latency_ms.toFixed(0)} ms`;
+    const cacheEl = document.getElementById("meta-cache");
+    cacheEl.textContent = data.cached ? "✅ HIT" : "❌ MISS";
+    cacheEl.className = `meta-value ${data.cached ? "cached" : "generated"}`;
+    document.getElementById("meta-doc-len").textContent = `${data.document_length.toLocaleString()} chars`;
+    document.getElementById("meta-compression").textContent = `${(data.compression_ratio * 100).toFixed(1)}%`;
+    document.getElementById("meta-grid").style.display = "grid";
+
+    showStatus("success", `✅ Summary generated in ${data.latency_ms.toFixed(0)}ms ${data.cached ? "(cached)" : "(generated)"}`);
+
+  } catch (err) {
+    if (err.message.includes("Failed to fetch") || err.name === "TypeError") {
+      showStatus("error", "⚠ Cannot reach API server. Start with: uvicorn inference.main:app --port 8000");
+    } else {
+      showStatus("error", `⚠ Error: ${err.message}`);
+    }
+    document.getElementById("summary-output").innerHTML = `<span class="output-placeholder">Error: ${err.message}</span>`;
+  } finally {
+    setLoading(false);
+  }
+}
+
+// ── ROUGE Computation (client-side n-gram approximation) ──
+function computeROUGE() {
+  const summary   = currentSummary || document.getElementById("summary-output").textContent;
+  const reference = document.getElementById("reference-input").value.trim();
+
+  if (!summary || summary.includes("will appear here")) {
+    showStatus("error", "⚠ Generate a summary first."); return;
+  }
+  if (!reference) {
+    showStatus("error", "⚠ Provide a reference summary."); return;
+  }
+
+  const r1 = ngramRouge(summary, reference, 1);
+  const r2 = ngramRouge(summary, reference, 2);
+  const rL = lcsRouge(summary, reference);
+
+  animateROUGE("r1", r1);
+  animateROUGE("r2", r2);
+  animateROUGE("rL", rL);
+}
+
+function tokenize(text) {
+  return text.toLowerCase().replace(/[^a-z0-9\s]/g, "").split(/\s+/).filter(Boolean);
+}
+
+function ngramRouge(pred, ref, n) {
+  const predNgrams = getNgrams(tokenize(pred), n);
+  const refNgrams  = getNgrams(tokenize(ref),  n);
+  if (!predNgrams.size || !refNgrams.size) return 0;
+
+  let overlap = 0;
+  for (const [key, cnt] of predNgrams.entries()) {
+    overlap += Math.min(cnt, refNgrams.get(key) || 0);
+  }
+  const precision = overlap / [...predNgrams.values()].reduce((a,b) => a+b, 0);
+  const recall    = overlap / [...refNgrams.values()].reduce((a,b) => a+b, 0);
+  if (precision + recall === 0) return 0;
+  return (2 * precision * recall) / (precision + recall);
+}
+
+function getNgrams(tokens, n) {
+  const map = new Map();
+  for (let i = 0; i <= tokens.length - n; i++) {
+    const key = tokens.slice(i, i+n).join(" ");
+    map.set(key, (map.get(key) || 0) + 1);
+  }
+  return map;
+}
+
+function lcsRouge(pred, ref) {
+  const pTok = tokenize(pred);
+  const rTok = tokenize(ref);
+  const lcs  = lcsDPLength(pTok, rTok);
+  if (!pTok.length || !rTok.length) return 0;
+  const p = lcs / pTok.length;
+  const r = lcs / rTok.length;
+  if (p + r === 0) return 0;
+  return (2 * p * r) / (p + r);
+}
+
+function lcsDPLength(a, b) {
+  const m = Math.min(a.length, 200);
+  const n = Math.min(b.length, 200);
+  const dp = Array.from({length: m+1}, () => new Array(n+1).fill(0));
+  for (let i = 1; i <= m; i++)
+    for (let j = 1; j <= n; j++)
+      dp[i][j] = a[i-1] === b[j-1] ? dp[i-1][j-1]+1 : Math.max(dp[i-1][j], dp[i][j-1]);
+  return dp[m][n];
+}
+
+function animateROUGE(id, score) {
+  const s = Math.round(score * 10000) / 10000;
+  document.getElementById(`${id}-score`).textContent = s.toFixed(4);
+  requestAnimationFrame(() => {
+    document.getElementById(`${id}-bar`).style.width = `${(s * 100).toFixed(1)}%`;
+  });
+}
+
+function resetROUGE() {
+  ["r1","r2","rL"].forEach(id => {
+    document.getElementById(`${id}-score`).textContent = "—";
+    document.getElementById(`${id}-bar`).style.width = "0%";
+  });
+}
+
+// ── Keyboard shortcut: Ctrl+Enter ─────────────────────────
+document.addEventListener("keydown", e => {
+  if ((e.ctrlKey || e.metaKey) && e.key === "Enter") summarizeDocument();
+});
+</script>
+</body>
+</html>

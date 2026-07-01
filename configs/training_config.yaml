@@ -1,0 +1,100 @@
+# ============================================================
+# QLoRA Training Configuration — Llama 3.1 8B
+# ============================================================
+
+model:
+  name: "meta-llama/Llama-3.1-8B"
+  trust_remote_code: true
+  use_auth_token: true          # Uses HF_TOKEN from env
+
+# --- QLoRA: 4-bit NF4 quantization via bitsandbytes ---
+quantization:
+  load_in_4bit: true
+  bnb_4bit_quant_type: "nf4"           # Normal Float 4 — best for NLP
+  bnb_4bit_compute_dtype: "bfloat16"   # bfloat16 compute on T4
+  bnb_4bit_use_double_quant: true      # Nested quantization saves extra memory
+
+# --- LoRA Adapter Config ---
+lora:
+  r: 16                                # Rank — controls adapter capacity
+  lora_alpha: 32                       # Scaling factor (alpha/r = 2)
+  lora_dropout: 0.05
+  bias: "none"
+  task_type: "CAUSAL_LM"
+  # Full list of attention + MLP modules for Llama 3.1 8B
+  target_modules:
+    - "q_proj"
+    - "k_proj"
+    - "v_proj"
+    - "o_proj"
+    - "gate_proj"
+    - "up_proj"
+    - "down_proj"
+  # trainable_params ≈ 0.1% of 8B = ~8M params
+
+# --- Dataset Config ---
+data:
+  dataset_name: "cnn_dailymail"
+  dataset_version: "3.0.0"
+  train_samples: 50000           # Curated 50K corpus
+  val_samples: 5000
+  test_samples: 5000
+  max_source_length: 1024        # Article tokens
+  max_target_length: 256         # Summary tokens
+  seed: 42
+  num_proc: 4                    # Parallel preprocessing workers
+
+# --- Instruction Prompt Template ---
+prompt:
+  template: |
+    <|begin_of_text|><|start_header_id|>system<|end_header_id|>
+    You are an expert document summarizer. Provide concise, accurate summaries that capture the key information.<|eot_id|>
+    <|start_header_id|>user<|end_header_id|>
+    Summarize the following article:
+
+    {article}<|eot_id|>
+    <|start_header_id|>assistant<|end_header_id|>
+    {summary}<|eot_id|>
+
+# --- Training Hyperparameters ---
+training:
+  output_dir: "./outputs/lora_model"
+  num_train_epochs: 3
+  per_device_train_batch_size: 4
+  per_device_eval_batch_size: 4
+  gradient_accumulation_steps: 4     # Effective batch = 16
+  learning_rate: 2.0e-4
+  weight_decay: 0.01
+  warmup_ratio: 0.03
+  lr_scheduler_type: "cosine"
+  optim: "paged_adamw_8bit"          # Memory-efficient optimizer
+  logging_steps: 50
+  eval_steps: 200
+  save_steps: 500
+  save_total_limit: 3
+  load_best_model_at_end: true
+  metric_for_best_model: "eval_loss"
+  greater_is_better: false
+  bf16: true
+  fp16: false
+  max_grad_norm: 0.3
+  group_by_length: true              # Reduces padding overhead
+  dataloader_num_workers: 4
+  report_to: "wandb"
+  run_name: "qlora-llama31-8b-cnn-dailymail"
+
+# --- Perplexity-Guided Early Stopping ---
+early_stopping:
+  patience: 3                        # Stop after 3 non-improving evals
+  threshold: 0.001                   # Minimum improvement delta
+  monitor: "eval_perplexity"
+
+# --- Ablation Study Grid ---
+ablation:
+  lora_ranks: [4, 8, 16, 32]
+  learning_rates: [1e-4, 2e-4, 5e-4]
+  tokenization_strategies:
+    - name: "llama31_bpe"
+      description: "Default Llama 3.1 BPE tokenizer"
+    - name: "llama31_bpe_truncated"
+      description: "Aggressive truncation at 512 tokens"

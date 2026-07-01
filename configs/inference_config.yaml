@@ -1,0 +1,66 @@
+# ============================================================
+# Inference Backend Configuration
+# AWQ + vLLM + FastAPI + Redis
+# ============================================================
+
+# --- AWQ Quantized Model ---
+model:
+  awq_model_path: "./outputs/awq_model"
+  fallback_model_path: "./outputs/merged_model"   # Non-quantized fallback
+  hf_model_name: "meta-llama/Llama-3.1-8B"
+  trust_remote_code: true
+
+# --- vLLM Engine Config ---
+vllm:
+  tensor_parallel_size: 1          # Single T4 GPU
+  gpu_memory_utilization: 0.85     # Leave 15% headroom
+  max_model_len: 2048
+  max_num_seqs: 256                # Concurrent sequences
+  dtype: "auto"
+  quantization: "awq"              # AWQ 4-bit
+  enable_prefix_caching: true      # Speeds up repeated prompts
+  swap_space: 4                    # GB of CPU swap
+  block_size: 16
+
+# --- Generation Defaults ---
+generation:
+  max_new_tokens: 256
+  temperature: 0.1                 # Low temp for factual summaries
+  top_p: 0.9
+  top_k: 50
+  repetition_penalty: 1.1
+  stop_tokens:
+    - "<|eot_id|>"
+    - "<|end_of_text|>"
+
+# --- Redis Cache ---
+redis:
+  url: "redis://localhost:6379"
+  ttl: 3600                        # 1 hour cache TTL
+  max_connections: 20
+  socket_timeout: 5
+  retry_on_timeout: true
+  hash_algorithm: "sha256"         # For cache key generation
+
+# --- FastAPI Server ---
+api:
+  host: "0.0.0.0"
+  port: 8000
+  workers: 1                       # Single worker with vLLM
+  timeout_keep_alive: 120
+  log_level: "info"
+  cors_origins:
+    - "http://localhost:3000"
+    - "http://localhost:8080"
+    - "*"
+
+# --- Rate Limiting ---
+rate_limit:
+  requests_per_minute: 60
+  burst: 10
+
+# --- Observability ---
+metrics:
+  enabled: true
+  endpoint: "/metrics"
+  latency_percentiles: [50, 90, 95, 99]
