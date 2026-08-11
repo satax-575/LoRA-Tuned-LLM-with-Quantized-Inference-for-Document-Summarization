@@ -298,7 +298,8 @@ def parse_args():
     return parser.parse_args()
 
 
-if __name__ == "__main__":
+def main():
+    """CLI entry point — called by qlora-benchmark console script."""
     args = parse_args()
     runner = BenchmarkRunner(
         llama_model_path=args.llama_model,
@@ -307,3 +308,7 @@ if __name__ == "__main__":
         report_only=args.report_only,
     )
     runner.run()
+
+
+if __name__ == "__main__":
+    main()

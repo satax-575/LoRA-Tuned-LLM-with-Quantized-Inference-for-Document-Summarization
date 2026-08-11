@@ -18,7 +18,7 @@ import yaml
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
-from transformers import AutoModelForCausalLM, AutoTokenizer, TrainingArguments, Trainer
+from transformers import AutoModelForCausalLM, AutoTokenizer, TrainingArguments, DataCollatorForLanguageModeling
 from peft import get_peft_model, prepare_model_for_kbit_training, LoraConfig, TaskType
 from datasets import load_from_disk
 from trl import SFTTrainer
@@ -182,13 +182,21 @@ class AblationStudy:
 
         es_callback = PerplexityEarlyStoppingCallback(patience=2, threshold=0.005)
 
-        trainer = Trainer(
+        collator = DataCollatorForLanguageModeling(
+            tokenizer=tokenizer,
+            mlm=False,
+            pad_to_multiple_of=8,
+        )
+
+        trainer = SFTTrainer(
             model=model,
             args=training_args,
             train_dataset=train_ds,
             eval_dataset=val_ds,
             tokenizer=tokenizer,
+            data_collator=collator,
             callbacks=[es_callback],
+            dataset_kwargs={"skip_prepare_dataset": True},
         )
 
         start_time = time.time()

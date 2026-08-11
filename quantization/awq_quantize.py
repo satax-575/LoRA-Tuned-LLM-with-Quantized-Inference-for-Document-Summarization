@@ -206,7 +206,8 @@ def parse_args():
     return parser.parse_args()
 
 
-if __name__ == "__main__":
+def main():
+    """CLI entry point — called by qlora-quantize console script."""
     args = parse_args()
     quantizer = AWQQuantizer(
         model_path=args.model_path,
@@ -219,3 +220,7 @@ if __name__ == "__main__":
 
     if args.verify:
         verify_awq_model(args.output_path)
+
+
+if __name__ == "__main__":
+    main()

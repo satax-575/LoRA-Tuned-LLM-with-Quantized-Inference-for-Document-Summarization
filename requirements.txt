@@ -1,6 +1,5 @@
 # ============================================================
-# QLoRA-Tuned Llama 3.1 8B — Document Summarization
-# Full Requirements
+# QLoRA-Tuned Llama 3.1 8B — Full Requirements
 # ============================================================
 
 # --- Core ML ---
@@ -8,7 +7,7 @@ torch>=2.1.0
 torchvision>=0.16.0
 
 # --- Hugging Face Ecosystem ---
-transformers>=4.44.0          # Llama 3.1 support
+transformers>=4.44.0          # Llama 3.1 support; `token=` API (not use_auth_token)
 accelerate>=0.33.0
 peft>=0.12.0                  # LoRA / QLoRA
 bitsandbytes>=0.43.0          # NF4 4-bit quantization
@@ -36,6 +35,12 @@ starlette>=0.37.2
 redis>=5.0.7
 hiredis>=2.3.2
 
+# --- Rate Limiting ---
+slowapi>=0.1.9                # FastAPI rate limiting (token bucket)
+
+# --- Observability ---
+prometheus-client>=0.20.0     # Prometheus metrics export
+
 # --- Evaluation ---
 rouge-score>=0.1.2
 nltk>=3.8.1
@@ -59,7 +64,7 @@ pyyaml>=6.0.1
 python-dotenv>=1.0.1
 rich>=13.7.0
 typer>=0.12.0
-loguru>=0.7.2
+loguru>=0.7.2                 # Structured logging (replaces stdlib logging in inference server)
 
 # --- Experiment Tracking ---
 wandb>=0.17.0

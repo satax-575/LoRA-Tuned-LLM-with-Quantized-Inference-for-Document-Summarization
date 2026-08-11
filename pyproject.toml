@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "qlora-llm-summarization"
+version = "2.0.0"
+description = "QLoRA-Tuned Llama 3.1 8B for Domain-Adaptive Document Summarization"
+readme = "README.md"
+license = { file = "GITHUB/LICENSE" }
+requires-python = ">=3.10"
+classifiers = [
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "License :: OSI Approved :: MIT License",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Environment :: GPU :: NVIDIA CUDA",
+]
+
+[project.scripts]
+qlora-train     = "training.train:main"
+qlora-serve     = "inference.main:main"
+qlora-quantize  = "quantization.awq_quantize:main"
+qlora-benchmark = "evaluation.benchmark:main"
+qlora-demo      = "demo.app:main"
+
+[tool.setuptools.packages.find]
+exclude = ["tests*", "notebooks*", "outputs*", "data/processed*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = "-v --tb=short"
+
+[tool.coverage.run]
+source = ["inference", "training", "data", "evaluation", "quantization"]
+omit = ["tests/*", "setup.py", "conftest.py", "*/migrations/*"]
+
+[tool.coverage.report]
+show_missing = true
+exclude_lines = [
+    "pragma: no cover",
+    "if __name__ == .__main__.:",
+    "raise NotImplementedError",
+    "except ImportError",
+    "pass",
+]

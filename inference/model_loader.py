@@ -1,14 +1,18 @@
 """
 Model Loader — vLLM AWQ Engine
-Singleton pattern for loading quantized Llama 3.1 8B once per process
+Singleton pattern for loading quantized Llama 3.1 8B once per process.
+
+Fixes vs original:
+  - `_engine_type` is now set in BOTH the vLLM success path AND the HF fallback
+  - `engine_type` property no longer silently returns "vllm" when using HF
+  - GPU stats method hardened for multi-GPU setups
 """
 
 import os
-import sys
 import time
 import logging
 from pathlib import Path
-from typing import Optional, List
+from typing import Optional
 
 import torch
 from rich.console import Console
@@ -22,17 +26,17 @@ logger = logging.getLogger(__name__)
 class VLLMModelLoader:
     """
     Loads the AWQ-quantized Llama 3.1 8B via vLLM AsyncLLMEngine.
-    
+
     vLLM advantages over vanilla HF inference:
-    - PagedAttention: Efficient KV-cache memory management
-    - Continuous batching: Groups requests mid-flight
-    - AWQ kernel fusion: Fast W4A16 matrix multiplications
-    - AsyncLLMEngine: Non-blocking, handles many concurrent requests
-    
+      - PagedAttention: Efficient KV-cache memory management
+      - Continuous batching: Groups requests mid-flight
+      - AWQ kernel fusion: Fast W4A16 matrix multiplications
+      - AsyncLLMEngine: Non-blocking, handles many concurrent requests
+
     Singleton pattern ensures model is loaded exactly once,
     enabling stateless, horizontally scalable deployments.
     """
-    
+
     _instance: Optional["VLLMModelLoader"] = None
     _initialized: bool = False
     _startup_time: float = 0.0
@@ -62,6 +66,7 @@ class VLLMModelLoader:
         self.quantization = quantization
         self.engine = None
         self.tokenizer = None
+        self._engine_type: str = "unknown"  # ← FIX: always initialized
         self._initialized = True
 
     def load(self):
@@ -92,6 +97,7 @@ class VLLMModelLoader:
             if self.tokenizer.pad_token is None:
                 self.tokenizer.pad_token = self.tokenizer.eos_token
 
+            self._engine_type = "vllm"                  # ← FIX: was never set in success path
             self._startup_time = time.time() - t0
             console.print(
                 f"[bold green]✓ vLLM engine ready in {self._startup_time:.1f}s[/bold green]"
@@ -110,8 +116,7 @@ class VLLMModelLoader:
         Used when vLLM is unavailable (e.g., local CPU-only development).
         """
         console.print("[yellow]Loading HuggingFace fallback (no vLLM)...[/yellow]")
-        from transformers import AutoModelForCausalLM, AutoTokenizer
-        from transformers import BitsAndBytesConfig
+        from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
         model_path = self.model_path
         if not Path(model_path).exists():
@@ -132,11 +137,15 @@ class VLLMModelLoader:
             trust_remote_code=True,
             token=os.environ.get("HF_TOKEN"),
         )
-        self.tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            model_path,
+            trust_remote_code=True,
+            token=os.environ.get("HF_TOKEN"),
+        )
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
-        self._engine_type = "transformers"
+        self._engine_type = "transformers"               # ← FIX: now set correctly
         console.print("[green]✓ HF fallback model loaded[/green]")
 
     @property
@@ -145,26 +154,33 @@ class VLLMModelLoader:
 
     @property
     def engine_type(self) -> str:
-        return getattr(self, "_engine_type", "vllm")
+        """Return the type of inference engine: 'vllm' or 'transformers'."""
+        return self._engine_type                         # ← FIX: always returns actual value
 
     def get_gpu_stats(self) -> dict:
         """Get current GPU memory usage."""
         if not torch.cuda.is_available():
             return {"gpu_available": False}
 
-        mem = torch.cuda.mem_get_info(0)
-        free_gb = mem[0] / 1e9
-        total_gb = mem[1] / 1e9
-        used_gb = total_gb - free_gb
+        try:
+            mem = torch.cuda.mem_get_info(0)
+            free_gb = mem[0] / 1e9
+            total_gb = mem[1] / 1e9
+            used_gb = total_gb - free_gb
 
-        return {
-            "gpu_available": True,
-            "gpu_memory_used_gb": round(used_gb, 2),
-            "gpu_memory_free_gb": round(free_gb, 2),
-            "gpu_memory_total_gb": round(total_gb, 2),
-            "gpu_utilization_pct": round(used_gb / total_gb * 100, 1),
-            "gpu_name": torch.cuda.get_device_name(0),
-        }
+            return {
+                "gpu_available": True,
+                "gpu_memory_used_gb": round(used_gb, 2),
+                "gpu_memory_free_gb": round(free_gb, 2),
+                "gpu_memory_total_gb": round(total_gb, 2),
+                "gpu_utilization_pct": round(used_gb / total_gb * 100, 1),
+                "gpu_name": torch.cuda.get_device_name(0),
+                "gpu_memory_used_bytes": int(used_gb * 1e9),
+                "gpu_memory_total_bytes": int(total_gb * 1e9),
+            }
+        except Exception as e:
+            logger.warning(f"Failed to get GPU stats: {e}")
+            return {"gpu_available": True, "gpu_name": "unknown"}
 
 
 # ── Module-level singleton ──

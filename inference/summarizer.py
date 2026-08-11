@@ -1,6 +1,12 @@
 """
 Core Summarization Logic
-Async inference with vLLM, cache integration, latency tracking
+Async inference with vLLM or HF fallback, Redis cache integration, latency tracking.
+
+Changes vs original:
+  - Imports format_inference_prompt from inference.prompt_utils (not data.dataset_builder)
+    This decouples the inference server from the training data pipeline.
+  - Prometheus metrics integration for cache hits/misses
+  - Added stream() async generator for SSE streaming endpoint
 """
 
 import time
@@ -13,7 +19,7 @@ from rich.console import Console
 
 from inference.cache import ResponseCache
 from inference.model_loader import VLLMModelLoader
-from data.dataset_builder import format_inference_prompt
+from inference.prompt_utils import format_inference_prompt, get_stop_tokens  # ← Fixed import
 
 console = Console()
 logger = logging.getLogger(__name__)
@@ -22,16 +28,16 @@ logger = logging.getLogger(__name__)
 class Summarizer:
     """
     Async document summarization with vLLM + Redis caching.
-    
+
     Request flow:
-    1. Check Redis cache (cache key = SHA-256 of document + params)
-    2. Cache HIT  → return cached summary (latency ~10ms)
-    3. Cache MISS → run vLLM inference → cache result → return summary
-    
+      1. Check Redis cache (cache key = SHA-256 of document + params)
+      2. Cache HIT  → return cached summary (latency ~10ms)
+      3. Cache MISS → run vLLM inference → cache result → return summary
+
     The 40% P95 latency reduction is achieved by:
-    - Cache hits eliminating model inference entirely (~10ms vs ~700ms)
-    - vLLM's continuous batching grouping concurrent requests
-    - AWQ GEMM kernel reducing per-token compute time
+      - Cache hits eliminating model inference entirely (~10ms vs ~700ms)
+      - vLLM's continuous batching grouping concurrent requests
+      - AWQ GEMM kernel reducing per-token compute time
     """
 
     def __init__(self, loader: VLLMModelLoader, cache: ResponseCache):
@@ -49,17 +55,19 @@ class Summarizer:
     ) -> dict:
         """
         Summarize a document. Returns summary + metadata dict.
-        
+
         Args:
             document: Full article text
             max_new_tokens: Max tokens to generate
             temperature: Sampling temperature
             top_p: Nucleus sampling
             use_cache: Whether to use Redis cache
-        
+
         Returns:
             dict with 'summary', 'cached', 'latency_ms', etc.
         """
+        from inference.metrics_exporter import record_cache_hit, record_cache_miss
+
         t_start = time.perf_counter()
 
         # ── 1. Cache Lookup ──
@@ -68,6 +76,7 @@ class Summarizer:
             if cached_data:
                 latency_ms = (time.perf_counter() - t_start) * 1000
                 self._request_latencies.append(latency_ms)
+                record_cache_hit()
                 return {
                     "summary": cached_data["summary"],
                     "cached": True,
@@ -78,6 +87,8 @@ class Summarizer:
                         len(cached_data["summary"]) / max(len(document), 1), 4
                     ),
                 }
+
+        record_cache_miss()
 
         # ── 2. Generate Summary ──
         summary = await self._generate(document, max_new_tokens, temperature, top_p)
@@ -99,6 +110,37 @@ class Summarizer:
             "summary_length": len(summary),
             "compression_ratio": round(len(summary) / max(len(document), 1), 4),
         }
+
+    async def stream(
+        self,
+        document: str,
+        max_new_tokens: int = 256,
+        temperature: float = 0.1,
+        top_p: float = 0.9,
+    ) -> AsyncIterator[str]:
+        """
+        Stream tokens as SSE events.
+        Yields formatted SSE data strings from inference.streaming module.
+        """
+        from inference.streaming import stream_vllm, stream_hf
+
+        prompt = format_inference_prompt(document)
+
+        if self.loader.engine_type == "vllm":
+            async for chunk in stream_vllm(
+                self.loader.engine, prompt, max_new_tokens, temperature, top_p
+            ):
+                yield chunk
+        else:
+            async for chunk in stream_hf(
+                self.loader.engine,
+                self.loader.tokenizer,
+                prompt,
+                max_new_tokens,
+                temperature,
+                top_p,
+            ):
+                yield chunk
 
     async def _generate(
         self,
@@ -131,7 +173,7 @@ class Summarizer:
             temperature=temperature,
             top_p=top_p,
             repetition_penalty=1.1,
-            stop=["<|eot_id|>", "<|end_of_text|>"],
+            stop=get_stop_tokens(),
         )
 
         request_id = str(uuid.uuid4())
@@ -190,7 +232,7 @@ class Summarizer:
             outputs = model.generate(
                 **inputs,
                 max_new_tokens=max_new_tokens,
-                temperature=temperature,
+                temperature=temperature if temperature > 0 else None,
                 top_p=top_p,
                 repetition_penalty=1.1,
                 do_sample=temperature > 0,

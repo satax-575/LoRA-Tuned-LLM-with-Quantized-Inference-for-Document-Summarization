@@ -1,6 +1,14 @@
 """
 QLoRA Trainer Setup
-Configures Llama 3.1 8B with QLoRA + SFTTrainer for instruction fine-tuning
+Configures Llama 3.1 8B with QLoRA + SFTTrainer for instruction fine-tuning.
+
+Key fixes vs original:
+  - Removed incompatible DataCollatorForSeq2Seq (conflicts with SFTTrainer)
+  - Added Flash Attention 2 detection with graceful SDPA fallback
+  - Proper SFTTrainer dataset_text_field / formatting_func removed
+    (dataset is pre-tokenized — we pass token IDs directly)
+  - Added `dataset_kwargs={"skip_prepare_dataset": True}` so SFTTrainer
+    does not re-process our already-tokenized + masked dataset
 """
 
 import os
@@ -14,7 +22,7 @@ from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
     TrainingArguments,
-    DataCollatorForSeq2Seq,
+    DataCollatorForLanguageModeling,
 )
 from peft import get_peft_model, prepare_model_for_kbit_training
 from datasets import load_from_disk
@@ -39,15 +47,42 @@ console = Console()
 logger = logging.getLogger(__name__)
 
 
+def _detect_attn_implementation() -> str:
+    """
+    Detect the best attention implementation available.
+
+    Priority:
+      1. flash_attention_2 — fastest, requires Ampere+ GPU + flash-attn package
+      2. sdpa             — PyTorch 2.0+ scaled dot-product attention (always available)
+      3. eager            — fallback
+    """
+    try:
+        import flash_attn  # noqa: F401
+        if torch.cuda.is_available():
+            # Check for Ampere (sm_80+) or newer compute capability
+            cc = torch.cuda.get_device_capability(0)
+            if cc[0] >= 8:
+                return "flash_attention_2"
+    except ImportError:
+        pass
+
+    # PyTorch 2.0+ SDPA is always a safe fallback
+    if hasattr(torch.nn.functional, "scaled_dot_product_attention"):
+        return "sdpa"
+
+    return "eager"
+
+
 class QLoRATrainer:
     """
     Full QLoRA training pipeline for Llama 3.1 8B on CNN/DailyMail.
-    
+
     Architecture:
-    - Base: Llama 3.1 8B loaded in 4-bit NF4 via bitsandbytes
-    - Adapter: LoRA rank-16, alpha=32 via PEFT
-    - Trainer: SFTTrainer (TRL) with perplexity early stopping
-    - Optimizer: paged_adamw_8bit (memory-efficient)
+      - Base: Llama 3.1 8B loaded in 4-bit NF4 via bitsandbytes
+      - Adapter: LoRA rank-16, alpha=32 via PEFT
+      - Trainer: SFTTrainer (TRL) with perplexity early stopping
+      - Optimizer: paged_adamw_8bit (memory-efficient)
+      - Attention: Flash Attention 2 (if available) else SDPA
     """
 
     def __init__(self, config_path: str = "configs/training_config.yaml"):
@@ -60,8 +95,10 @@ class QLoRATrainer:
 
     def load_model_and_tokenizer(self):
         """Load Llama 3.1 8B in 4-bit NF4 from HuggingFace Hub."""
+        attn_impl = _detect_attn_implementation()
         console.print(
-            f"\n[bold cyan]Loading {self.model_name} in 4-bit NF4...[/bold cyan]"
+            f"\n[bold cyan]Loading {self.model_name} in 4-bit NF4 "
+            f"(attn: {attn_impl})...[/bold cyan]"
         )
 
         # ── 4-bit NF4 Quantization Config ──
@@ -75,7 +112,7 @@ class QLoRATrainer:
             trust_remote_code=True,
             token=self.hf_token,
             torch_dtype=torch.bfloat16,
-            attn_implementation="flash_attention_2",  # Flash Attention 2 on T4
+            attn_implementation=attn_impl, # Flash Attn 2 or SDPA, not hardcoded
         )
 
         # ── Prepare for k-bit training (gradient checkpointing + cast) ──
@@ -105,7 +142,7 @@ class QLoRATrainer:
         console.print("[green]✓ Model and tokenizer loaded[/green]")
 
     def load_dataset(self, dataset_path: str = "./data/processed"):
-        """Load pre-tokenized dataset from disk."""
+        """Load pre-tokenized + label-masked dataset from disk."""
         console.print(f"[cyan]Loading dataset from {dataset_path}...[/cyan]")
         dataset = load_from_disk(dataset_path)
         console.print(
@@ -147,11 +184,24 @@ class QLoRATrainer:
             report_to=t_cfg["report_to"],
             run_name=t_cfg["run_name"],
             gradient_checkpointing=True,
+            gradient_checkpointing_kwargs={"use_reentrant": False},  # Required for PEFT
             remove_unused_columns=False,
+            ddp_find_unused_parameters=False,
         )
 
     def build_trainer(self, dataset) -> SFTTrainer:
-        """Construct SFTTrainer with all callbacks."""
+        """
+        Construct SFTTrainer with pre-tokenized dataset.
+
+        Critical: We use `dataset_kwargs={"skip_prepare_dataset": True}` because
+        our dataset is already tokenized and label-masked by CNNDailyMailBuilder.
+        Without this, SFTTrainer would re-process and overwrite our carefully
+        computed -100 label masks.
+
+        DataCollator: DataCollatorForLanguageModeling (not DataCollatorForSeq2Seq)
+        — the Seq2Seq collator is for encoder-decoder models and is incompatible
+        with SFTTrainer's causal LM setup.
+        """
         training_args = self.build_training_args()
 
         # ── Callbacks ──
@@ -165,20 +215,25 @@ class QLoRATrainer:
             ModelCheckpointCallback(),
         ]
 
+        # ── Data Collator ──
+        # DataCollatorForLanguageModeling: pads input_ids and propagates -100 labels
+        # mlm=False → causal LM mode (not masked LM)
+        collator = DataCollatorForLanguageModeling(
+            tokenizer=self.tokenizer,
+            mlm=False,          # Causal LM, not masked LM
+            pad_to_multiple_of=8,
+        )
+
         self.trainer = SFTTrainer(
             model=self.model,
             args=training_args,
             train_dataset=dataset["train"],
             eval_dataset=dataset["validation"],
             tokenizer=self.tokenizer,
-            data_collator=DataCollatorForSeq2Seq(
-                tokenizer=self.tokenizer,
-                model=self.model,
-                label_pad_token_id=-100,      # Ignore padding in loss
-                pad_to_multiple_of=8,          # Efficient tensor ops
-            ),
+            data_collator=collator,
             callbacks=callbacks,
-            max_seq_length=self.cfg["data"]["max_source_length"] + self.cfg["data"]["max_target_length"],
+            max_seq_length=self.cfg["data"]["max_source_length"] + self.cfg["data"]["max_target_length"] + 128,
+            dataset_kwargs={"skip_prepare_dataset": True},  # Dataset already processed
         )
         return self.trainer
 
@@ -212,11 +267,13 @@ class QLoRATrainer:
 
     def merge_and_save(self, output_dir: str = "./outputs/merged_model"):
         """Merge LoRA adapter into base model and save full weights."""
-        from peft import PeftModel
-
         console.print(f"\n[cyan]Merging LoRA adapter into base model...[/cyan]")
-        self.model = self.model.merge_and_unload()
+
+        # Ensure we're operating on the PEFT model
+        merged = self.model.merge_and_unload()
+
         Path(output_dir).mkdir(parents=True, exist_ok=True)
-        self.model.save_pretrained(output_dir)
+        merged.save_pretrained(output_dir, safe_serialization=True)
         self.tokenizer.save_pretrained(output_dir)
+
         console.print(f"[green]✓ Merged model saved to: {output_dir}[/green]")

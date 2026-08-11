@@ -1,21 +1,28 @@
 """
 Data Pipeline — CNN/DailyMail 50K Corpus Builder
-Curates and preprocesses the dataset with Llama 3.1 BPE tokenizer
+Curates and preprocesses the dataset with Llama 3.1 BPE tokenizer.
+
+Key design decisions:
+  - Proper causal label masking: only summary tokens contribute to loss
+  - Text cleaning via preprocessing.py before tokenization
+  - Uses `token=` (not deprecated `use_auth_token=`)
+  - Dynamic padding deferred to DataCollator — no padding here
 """
 
 import os
-import hashlib
 import logging
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 import yaml
-from datasets import load_dataset, DatasetDict, Dataset
+from datasets import load_dataset, DatasetDict
 from transformers import AutoTokenizer
 from tqdm import tqdm
 from dotenv import load_dotenv
 from rich.console import Console
 from rich.progress import track
+
+from data.preprocessing import clean_article, clean_summary
 
 load_dotenv()
 console = Console()
@@ -23,37 +30,50 @@ logger = logging.getLogger(__name__)
 
 
 # ─────────────────────────────────────────────
-# Prompt Formatting (Llama 3.1 Chat Template)
+# Prompt Templates (kept here for training data construction)
+# Inference prompt formatting is in inference/prompt_utils.py
 # ─────────────────────────────────────────────
 
-INSTRUCTION_TEMPLATE = (
-    "<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n"
-    "You are an expert document summarizer. Provide concise, accurate summaries "
-    "that capture the key information.<|eot_id|>\n"
-    "<|start_header_id|>user<|end_header_id|>\n"
-    "Summarize the following article:\n\n{article}<|eot_id|>\n"
-    "<|start_header_id|>assistant<|end_header_id|>\n"
-    "{summary}<|eot_id|>"
+_BOS = "<|begin_of_text|>"
+_START_HEADER = "<|start_header_id|>"
+_END_HEADER = "<|end_header_id|>"
+_EOT = "<|eot_id|>"
+
+_SYSTEM_PROMPT = (
+    "You are an expert document summarizer. "
+    "Provide concise, accurate summaries that capture the key information."
 )
 
 
 def format_prompt(article: str, summary: str) -> str:
-    """Format article + summary into Llama 3.1 instruction format."""
-    return INSTRUCTION_TEMPLATE.format(
-        article=article.strip(),
-        summary=summary.strip(),
+    """
+    Format article + summary into a full Llama 3.1 instruction-tuning example.
+    Used during dataset construction and AWQ calibration.
+    """
+    return (
+        f"{_BOS}{_START_HEADER}system{_END_HEADER}\n"
+        f"{_SYSTEM_PROMPT}{_EOT}\n"
+        f"{_START_HEADER}user{_END_HEADER}\n"
+        f"Summarize the following article:\n\n{article.strip()}{_EOT}\n"
+        f"{_START_HEADER}assistant{_END_HEADER}\n"
+        f"{summary.strip()}{_EOT}"
     )
 
 
 def format_inference_prompt(article: str) -> str:
-    """Format article for inference (no summary — model generates it)."""
+    """
+    Format an article for inference (no summary — model generates it).
+
+    NOTE: For the inference server, prefer importing from inference.prompt_utils
+    to avoid loading the entire training pipeline. This function is kept here
+    for backwards compatibility and for use during AWQ calibration.
+    """
     return (
-        "<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n"
-        "You are an expert document summarizer. Provide concise, accurate summaries "
-        "that capture the key information.<|eot_id|>\n"
-        "<|start_header_id|>user<|end_header_id|>\n"
-        f"Summarize the following article:\n\n{article.strip()}<|eot_id|>\n"
-        "<|start_header_id|>assistant<|end_header_id|>\n"
+        f"{_BOS}{_START_HEADER}system{_END_HEADER}\n"
+        f"{_SYSTEM_PROMPT}{_EOT}\n"
+        f"{_START_HEADER}user{_END_HEADER}\n"
+        f"Summarize the following article:\n\n{article.strip()}{_EOT}\n"
+        f"{_START_HEADER}assistant{_END_HEADER}\n"
     )
 
 
@@ -64,11 +84,14 @@ def format_inference_prompt(article: str) -> str:
 class CNNDailyMailBuilder:
     """
     Builds a 50K-document corpus from CNN/DailyMail.
-    
-    - Downloads via HuggingFace Datasets
-    - Filters and curates samples
-    - Applies Llama 3.1 BPE tokenization
-    - Saves processed splits to disk
+
+    Pipeline:
+      1. Download via HuggingFace Datasets
+      2. Quality filter (word count bounds)
+      3. Text cleaning (bylines, boilerplate, unicode)
+      4. Apply Llama 3.1 BPE tokenization
+      5. Causal label masking — loss computed ONLY on summary tokens
+      6. Save processed splits to disk
     """
 
     def __init__(self, config_path: str = "configs/training_config.yaml"):
@@ -82,11 +105,12 @@ class CNNDailyMailBuilder:
         self.seed = self.data_cfg["seed"]
         self.hf_token = os.environ.get("HF_TOKEN")
 
-        # Llama 3.1 BPE Tokenizer
+        # ── Llama 3.1 BPE Tokenizer ──
+        # Uses `token=` (not deprecated `use_auth_token=`)
         console.print(f"[cyan]Loading tokenizer: {self.model_name}[/cyan]")
         self.tokenizer = AutoTokenizer.from_pretrained(
             self.model_name,
-            use_auth_token=self.hf_token,
+            token=self.hf_token,          # ← Fixed: was use_auth_token= (removed in 4.34)
             trust_remote_code=True,
         )
         if self.tokenizer.pad_token is None:
@@ -112,9 +136,9 @@ class CNNDailyMailBuilder:
         """
         Curate 50K training, 5K val, 5K test samples.
         Filters out:
-        - Articles shorter than 100 words
-        - Summaries shorter than 20 words
-        - Articles longer than 1500 words (extreme outliers)
+          - Articles shorter than 100 words
+          - Summaries shorter than 20 words
+          - Articles longer than 1500 words (extreme outliers)
         """
         console.print("[cyan]Curating 50K-document corpus...[/cyan]")
 
@@ -150,36 +174,86 @@ class CNNDailyMailBuilder:
 
     def tokenize_dataset(self, dataset: DatasetDict) -> DatasetDict:
         """
-        Apply Llama 3.1 BPE tokenization.
-        Formats each example into instruction-following template.
+        Apply Llama 3.1 BPE tokenization with proper causal label masking.
+
+        Masking Strategy:
+          - Full prompt (system + user + article + assistant header) is tokenized
+          - Labels are set to -100 for all PROMPT tokens (article + instructions)
+          - Only SUMMARY tokens contribute to the cross-entropy loss
+          - This is the correct instruction-following training approach
+
+        Why this matters:
+          Training on the full sequence (no masking) causes the model to also try
+          to predict the article content, diluting the gradient signal and typically
+          reducing ROUGE-L by 1-3 points compared to masked training.
         """
-        console.print("[cyan]Applying Llama 3.1 BPE tokenization...[/cyan]")
+        console.print("[cyan]Applying Llama 3.1 BPE tokenization with causal label masking...[/cyan]")
+
+        max_length = self.max_source + self.max_target + 128  # +128 for template tokens
 
         def tokenize_fn(examples):
-            prompts = [
-                format_prompt(article, summary)
-                for article, summary in zip(
-                    examples["article"], examples["highlights"]
+            all_input_ids = []
+            all_attention_masks = []
+            all_labels = []
+
+            for article_raw, highlights_raw in zip(
+                examples["article"], examples["highlights"]
+            ):
+                # ── 1. Clean text ──
+                article = clean_article(article_raw)
+                summary = clean_summary(highlights_raw)
+
+                # ── 2. Build full prompt (prompt + response) ──
+                full_prompt = format_prompt(article, summary)
+
+                # ── 3. Build prompt-only prefix (to find boundary for masking) ──
+                prompt_only = format_inference_prompt(article)
+
+                # ── 4. Tokenize both ──
+                full_tokenized = self.tokenizer(
+                    full_prompt,
+                    truncation=True,
+                    max_length=max_length,
+                    padding=False,
+                    return_tensors=None,
                 )
-            ]
-            tokenized = self.tokenizer(
-                prompts,
-                max_length=self.max_source + self.max_target + 64,  # +64 for template tokens
-                truncation=True,
-                padding=False,  # Dynamic padding in DataCollator
-                return_tensors=None,
-            )
-            tokenized["labels"] = tokenized["input_ids"].copy()
-            return tokenized
+                prompt_tokenized = self.tokenizer(
+                    prompt_only,
+                    truncation=False,
+                    padding=False,
+                    return_tensors=None,
+                )
+
+                input_ids = full_tokenized["input_ids"]
+                attention_mask = full_tokenized["attention_mask"]
+
+                # ── 5. Causal Label Masking ──
+                # Mask all tokens up to and including the assistant header
+                # Only the summary portion contributes to loss
+                prompt_len = len(prompt_tokenized["input_ids"])
+                labels = [-100] * prompt_len + input_ids[prompt_len:]
+
+                # Truncate labels to match input_ids if prompt_len > max_length
+                labels = labels[:len(input_ids)]
+
+                all_input_ids.append(input_ids)
+                all_attention_masks.append(attention_mask)
+                all_labels.append(labels)
+
+            return {
+                "input_ids": all_input_ids,
+                "attention_mask": all_attention_masks,
+                "labels": all_labels,
+            }
 
         tokenized = dataset.map(
             tokenize_fn,
             batched=True,
             num_proc=self.data_cfg.get("num_proc", 4),
             remove_columns=dataset["train"].column_names,
-            desc="Tokenizing",
+            desc="Tokenizing with causal label masking",
         )
-        console.print("[green]✓ Tokenization complete[/green]")
+        console.print("[green]✓ Tokenization complete (labels masked for causal LM)[/green]")
         return tokenized
 
     def save_dataset(self, dataset: DatasetDict, output_dir: str = "./data/processed"):
@@ -193,7 +267,7 @@ class CNNDailyMailBuilder:
         console.print(f"[green]✓ Saved tokenizer to {output_dir}/tokenizer[/green]")
 
     def build(self, output_dir: str = "./data/processed") -> DatasetDict:
-        """Full pipeline: load → curate → tokenize → save."""
+        """Full pipeline: load → curate → tokenize (with masking) → save."""
         console.print("\n[bold magenta]═══ Building 50K Document Corpus ═══[/bold magenta]\n")
         raw = self.load_raw_dataset()
         curated = self.curate_corpus(raw)
