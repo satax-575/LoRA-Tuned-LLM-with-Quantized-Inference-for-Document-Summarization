@@ -91,11 +91,19 @@ def main():
     # ── W&B Setup ──
     if args.no_wandb:
         os.environ["WANDB_DISABLED"] = "true"
+        console.print("[yellow]W&B logging disabled (--no-wandb)[/yellow]")
     else:
         wandb_key = os.environ.get("WANDB_API_KEY")
-        if wandb_key:
-            wandb.login(key=wandb_key)
-            console.print("[green]✓ Weights & Biases connected[/green]")
+        if not wandb_key:
+            console.print(
+                "[bold red]⚠ WANDB_API_KEY not found in environment.[/bold red]\n"
+                "  Set it in .env file: WANDB_API_KEY=your_key_here\n"
+                "  Get your key at: https://wandb.ai/authorize\n"
+                "  Or pass --no-wandb to skip experiment tracking."
+            )
+            sys.exit(1)
+        wandb.login(key=wandb_key)
+        console.print("[green]✓ Weights & Biases connected[/green]")
 
     # ── Step 1: Build Dataset ──
     if not args.skip_data_build:

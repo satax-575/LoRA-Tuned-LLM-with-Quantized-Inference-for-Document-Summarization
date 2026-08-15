@@ -54,23 +54,24 @@ class ResponseCache:
         self._total_saved_ms = 0.0
 
     async def connect(self):
-        """Initialize Redis connection pool."""
+        """Initialize Redis connection pool. Raises RuntimeError if Redis is unreachable."""
+        self._pool = aioredis.ConnectionPool.from_url(
+            self.redis_url,
+            max_connections=self.max_connections,
+            decode_responses=True,
+            socket_connect_timeout=5,
+            socket_timeout=5,
+            retry_on_timeout=True,
+        )
+        self._client = aioredis.Redis(connection_pool=self._pool)
         try:
-            self._pool = aioredis.ConnectionPool.from_url(
-                self.redis_url,
-                max_connections=self.max_connections,
-                decode_responses=True,
-                socket_connect_timeout=5,
-                socket_timeout=5,
-                retry_on_timeout=True,
-            )
-            self._client = aioredis.Redis(connection_pool=self._pool)
-            # Test connection
             await self._client.ping()
-            console.print(f"[green]✓ Redis connected: {self.redis_url}[/green]")
         except Exception as e:
-            logger.warning(f"Redis unavailable: {e}. Caching disabled.")
-            self._client = None
+            raise RuntimeError(
+                f"Cannot connect to Redis at {self.redis_url}: {e}. "
+                "Ensure Redis is running and REDIS_URL is correct."
+            ) from e
+        console.print(f"[green]✓ Redis connected: {self.redis_url}[/green]")
 
     async def disconnect(self):
         """Close Redis connections."""

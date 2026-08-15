@@ -119,28 +119,16 @@ class Summarizer:
         top_p: float = 0.9,
     ) -> AsyncIterator[str]:
         """
-        Stream tokens as SSE events.
+        Stream tokens as SSE events via vLLM AsyncLLMEngine.
         Yields formatted SSE data strings from inference.streaming module.
         """
-        from inference.streaming import stream_vllm, stream_hf
+        from inference.streaming import stream_vllm
 
         prompt = format_inference_prompt(document)
-
-        if self.loader.engine_type == "vllm":
-            async for chunk in stream_vllm(
-                self.loader.engine, prompt, max_new_tokens, temperature, top_p
-            ):
-                yield chunk
-        else:
-            async for chunk in stream_hf(
-                self.loader.engine,
-                self.loader.tokenizer,
-                prompt,
-                max_new_tokens,
-                temperature,
-                top_p,
-            ):
-                yield chunk
+        async for chunk in stream_vllm(
+            self.loader.engine, prompt, max_new_tokens, temperature, top_p
+        ):
+            yield chunk
 
     async def _generate(
         self,
@@ -149,14 +137,9 @@ class Summarizer:
         temperature: float,
         top_p: float,
     ) -> str:
-        """Run vLLM or HF inference to generate summary."""
+        """Run vLLM inference to generate summary."""
         prompt = format_inference_prompt(document)
-        engine_type = self.loader.engine_type
-
-        if engine_type == "vllm":
-            return await self._generate_vllm(prompt, max_new_tokens, temperature, top_p)
-        else:
-            return await self._generate_hf(prompt, max_new_tokens, temperature, top_p)
+        return await self._generate_vllm(prompt, max_new_tokens, temperature, top_p)
 
     async def _generate_vllm(
         self,
@@ -192,58 +175,6 @@ class Summarizer:
 
         return ""
 
-    async def _generate_hf(
-        self,
-        prompt: str,
-        max_new_tokens: int,
-        temperature: float,
-        top_p: float,
-    ) -> str:
-        """Synchronous HF generation wrapped for async context."""
-        import asyncio
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(
-            None,
-            self._generate_hf_sync,
-            prompt, max_new_tokens, temperature, top_p,
-        )
-
-    def _generate_hf_sync(
-        self,
-        prompt: str,
-        max_new_tokens: int,
-        temperature: float,
-        top_p: float,
-    ) -> str:
-        """Synchronous HF inference (fallback)."""
-        model = self.loader.engine
-        tokenizer = self.loader.tokenizer
-
-        inputs = tokenizer(
-            prompt,
-            return_tensors="pt",
-            truncation=True,
-            max_length=1024,
-        )
-        device = next(model.parameters()).device
-        inputs = {k: v.to(device) for k, v in inputs.items()}
-
-        with torch.no_grad():
-            outputs = model.generate(
-                **inputs,
-                max_new_tokens=max_new_tokens,
-                temperature=temperature if temperature > 0 else None,
-                top_p=top_p,
-                repetition_penalty=1.1,
-                do_sample=temperature > 0,
-                pad_token_id=tokenizer.pad_token_id,
-                eos_token_id=tokenizer.eos_token_id,
-            )
-
-        input_len = inputs["input_ids"].shape[1]
-        generated = outputs[0][input_len:]
-        text = tokenizer.decode(generated, skip_special_tokens=True)
-        return text.replace("<|eot_id|>", "").strip()
 
     def get_latency_percentiles(self) -> dict:
         """Compute latency percentiles across all requests."""

@@ -1,11 +1,11 @@
 """
-Model Loader — vLLM AWQ Engine
-Singleton pattern for loading quantized Llama 3.1 8B once per process.
+inference/model_loader.py
 
-Fixes vs original:
-  - `_engine_type` is now set in BOTH the vLLM success path AND the HF fallback
-  - `engine_type` property no longer silently returns "vllm" when using HF
-  - GPU stats method hardened for multi-GPU setups
+vLLM AsyncLLMEngine loader for the AWQ-quantized Llama 3.1 8B model.
+Singleton pattern ensures the model is loaded exactly once per process.
+
+vLLM is a required dependency — the server will not start without it.
+Run on Linux with a CUDA 12.1+ GPU (T4 16GB or better).
 """
 
 import os
@@ -18,6 +18,9 @@ import torch
 from rich.console import Console
 from dotenv import load_dotenv
 
+from vllm import AsyncLLMEngine, AsyncEngineArgs
+from transformers import AutoTokenizer
+
 load_dotenv()
 console = Console()
 logger = logging.getLogger(__name__)
@@ -27,14 +30,13 @@ class VLLMModelLoader:
     """
     Loads the AWQ-quantized Llama 3.1 8B via vLLM AsyncLLMEngine.
 
-    vLLM advantages over vanilla HF inference:
-      - PagedAttention: Efficient KV-cache memory management
-      - Continuous batching: Groups requests mid-flight
-      - AWQ kernel fusion: Fast W4A16 matrix multiplications
-      - AsyncLLMEngine: Non-blocking, handles many concurrent requests
+    vLLM provides:
+      - PagedAttention for efficient KV-cache memory management
+      - Continuous batching — groups requests mid-flight
+      - AWQ kernel fusion — fast W4A16 matrix multiplications
+      - AsyncLLMEngine — non-blocking, handles many concurrent requests
 
-    Singleton pattern ensures model is loaded exactly once,
-    enabling stateless, horizontally scalable deployments.
+    Singleton pattern ensures the model is loaded exactly once.
     """
 
     _instance: Optional["VLLMModelLoader"] = None
@@ -64,89 +66,44 @@ class VLLMModelLoader:
         self.gpu_memory_utilization = gpu_memory_utilization
         self.max_model_len = max_model_len
         self.quantization = quantization
-        self.engine = None
-        self.tokenizer = None
-        self._engine_type: str = "unknown"  # ← FIX: always initialized
+        self.engine: Optional[AsyncLLMEngine] = None
+        self.tokenizer: Optional[AutoTokenizer] = None
+        self._engine_type: str = "vllm"
         self._initialized = True
 
     def load(self):
         """Initialize the vLLM AsyncLLMEngine with the AWQ model."""
+        if not Path(self.model_path).exists():
+            raise FileNotFoundError(
+                f"AWQ model not found at '{self.model_path}'. "
+                "Run quantization/awq_quantize.py first, or set AWQ_MODEL_DIR in .env."
+            )
+
         console.print(f"\n[bold cyan]Loading vLLM engine from {self.model_path}...[/bold cyan]")
         t0 = time.time()
 
-        try:
-            from vllm import AsyncLLMEngine, AsyncEngineArgs
-            from transformers import AutoTokenizer
-
-            engine_args = AsyncEngineArgs(
-                model=self.model_path,
-                quantization=self.quantization,          # "awq"
-                tensor_parallel_size=self.tensor_parallel_size,
-                gpu_memory_utilization=self.gpu_memory_utilization,
-                max_model_len=self.max_model_len,
-                dtype="auto",
-                enable_prefix_caching=True,              # Reuse KV for repeated prompts
-                trust_remote_code=True,
-            )
-
-            self.engine = AsyncLLMEngine.from_engine_args(engine_args)
-
-            self.tokenizer = AutoTokenizer.from_pretrained(
-                self.model_path, trust_remote_code=True
-            )
-            if self.tokenizer.pad_token is None:
-                self.tokenizer.pad_token = self.tokenizer.eos_token
-
-            self._engine_type = "vllm"                  # ← FIX: was never set in success path
-            self._startup_time = time.time() - t0
-            console.print(
-                f"[bold green]✓ vLLM engine ready in {self._startup_time:.1f}s[/bold green]"
-            )
-
-        except ImportError:
-            logger.warning("vLLM not available. Falling back to HuggingFace transformers.")
-            self._load_hf_fallback()
-        except Exception as e:
-            logger.error(f"vLLM load failed: {e}. Trying HF fallback.")
-            self._load_hf_fallback()
-
-    def _load_hf_fallback(self):
-        """
-        Fallback: Load AWQ model with HuggingFace transformers.
-        Used when vLLM is unavailable (e.g., local CPU-only development).
-        """
-        console.print("[yellow]Loading HuggingFace fallback (no vLLM)...[/yellow]")
-        from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
-
-        model_path = self.model_path
-        if not Path(model_path).exists():
-            # Fall back to base model for local dev
-            model_path = os.environ.get("HF_MODEL_NAME", "meta-llama/Llama-3.1-8B")
-            console.print(f"[yellow]Model path not found. Using: {model_path}[/yellow]")
-
-        bnb_config = BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_quant_type="nf4",
-            bnb_4bit_compute_dtype=torch.bfloat16,
-            bnb_4bit_use_double_quant=True,
-        )
-        self.engine = AutoModelForCausalLM.from_pretrained(
-            model_path,
-            quantization_config=bnb_config if torch.cuda.is_available() else None,
-            device_map="auto",
+        engine_args = AsyncEngineArgs(
+            model=self.model_path,
+            quantization=self.quantization,
+            tensor_parallel_size=self.tensor_parallel_size,
+            gpu_memory_utilization=self.gpu_memory_utilization,
+            max_model_len=self.max_model_len,
+            dtype="auto",
+            enable_prefix_caching=True,
             trust_remote_code=True,
-            token=os.environ.get("HF_TOKEN"),
         )
+
+        self.engine = AsyncLLMEngine.from_engine_args(engine_args)
         self.tokenizer = AutoTokenizer.from_pretrained(
-            model_path,
-            trust_remote_code=True,
-            token=os.environ.get("HF_TOKEN"),
+            self.model_path, trust_remote_code=True
         )
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
-        self._engine_type = "transformers"               # ← FIX: now set correctly
-        console.print("[green]✓ HF fallback model loaded[/green]")
+        self._startup_time = time.time() - t0
+        console.print(
+            f"[bold green]✓ vLLM engine ready in {self._startup_time:.1f}s[/bold green]"
+        )
 
     @property
     def is_loaded(self) -> bool:
@@ -154,8 +111,7 @@ class VLLMModelLoader:
 
     @property
     def engine_type(self) -> str:
-        """Return the type of inference engine: 'vllm' or 'transformers'."""
-        return self._engine_type                         # ← FIX: always returns actual value
+        return self._engine_type
 
     def get_gpu_stats(self) -> dict:
         """Get current GPU memory usage."""
