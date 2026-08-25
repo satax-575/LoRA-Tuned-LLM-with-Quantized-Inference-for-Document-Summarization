@@ -145,7 +145,7 @@ async def stream_hf(
     full_text = ""
 
     # Run model.generate in a thread (it's blocking)
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     thread = Thread(target=model.generate, kwargs=generation_kwargs, daemon=True)
     thread.start()
 

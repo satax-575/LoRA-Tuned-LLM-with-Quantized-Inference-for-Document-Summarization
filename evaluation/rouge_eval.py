@@ -113,7 +113,7 @@ class LlamaEvaluator:
 
     def summarize_batch(self, articles: List[str], batch_size: int = 4) -> List[str]:
         """Generate summaries for a batch of articles."""
-        from data.dataset_builder import format_inference_prompt
+        from inference.prompt_utils import format_inference_prompt
 
         summaries = []
         for i in tqdm(range(0, len(articles), batch_size), desc="Llama inference"):

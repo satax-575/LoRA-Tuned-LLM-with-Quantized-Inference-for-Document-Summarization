@@ -130,7 +130,7 @@ class AWQQuantizer:
         AWQ uses these to identify activation-salient weights.
         """
         from datasets import load_dataset
-        from data.dataset_builder import format_inference_prompt
+        from inference.prompt_utils import format_inference_prompt
 
         dataset = load_dataset("cnn_dailymail", "3.0.0", split="train", trust_remote_code=True)
         dataset = dataset.shuffle(seed=42).select(range(self.calib_samples))

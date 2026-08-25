@@ -103,7 +103,7 @@ class HealthResponse(BaseModel):
     gpu_memory_used_gb: Optional[float]
     gpu_memory_total_gb: Optional[float]
     uptime_seconds: float
-    version: str = "1.0.0"
+    version: str = "2.0.0"
 
 
 class MetricsResponse(BaseModel):

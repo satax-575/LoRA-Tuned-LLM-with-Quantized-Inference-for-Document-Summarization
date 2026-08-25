@@ -363,7 +363,7 @@ async def summarize_batch(
             cached_count += 1
 
     total_latency_ms = (time.perf_counter() - t_start) * 1000
-    record_request("/summarize/batch", "200", (time.perf_counter() - t_start))
+    record_request("/summarize/batch", "200", total_latency_ms / 1000)
 
     return BatchSummarizeResponse(
         summaries=summaries,
