@@ -6,6 +6,7 @@ I wanted to understand what it actually takes to fine-tune an 8B-parameter LLM o
 
 The model trains only 0.1% of its parameters (8M out of 8B) and still beats BART-Large on ROUGE-L by a significant margin.
 
+[![CI](https://github.com/satax-575/LoRA-Tuned-LLM-with-Quantized-Inference-for-Document-Summarization/actions/workflows/ci.yml/badge.svg)](https://github.com/satax-575/LoRA-Tuned-LLM-with-Quantized-Inference-for-Document-Summarization/actions/workflows/ci.yml)
 [![ROUGE-L](https://img.shields.io/badge/ROUGE--L-0.72-brightgreen)]()
 [![Params](https://img.shields.io/badge/Trainable-0.1%25-purple)]()
 [![Python](https://img.shields.io/badge/Python-3.11-blue?logo=python)](https://python.org)
