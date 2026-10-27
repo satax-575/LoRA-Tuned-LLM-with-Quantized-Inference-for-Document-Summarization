@@ -84,9 +84,8 @@ class APIKeyMiddleware(BaseHTTPMiddleware):
             )
 
         if provided_key != self.api_key:
-            client_host = request.client.host if request.client else "unknown"
             logger.warning(
-                f"Invalid API key attempt from {client_host} "
+                f"Invalid API key attempt from {request.client.host} "
                 f"on {request.method} {request.url.path}"
             )
             return JSONResponse(

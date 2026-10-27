@@ -1,0 +1,32 @@
+# ============================================================
+# Grafana Datasource Provisioning — Prometheus
+#
+# What this file does:
+#   Grafana reads this at startup and automatically adds
+#   Prometheus as a data source. You never have to click
+#   "Add data source" manually in the Grafana UI.
+#
+# How Grafana finds this file:
+#   docker-compose.yml mounts this directory to:
+#   /etc/grafana/provisioning/datasources/
+#   Grafana scans that path at startup.
+# ============================================================
+
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    # "prometheus" is the Docker Compose service name — Docker's internal DNS
+    # resolves it to the Prometheus container's IP automatically.
+    # From outside Docker you'd use http://localhost:9090 instead.
+    url: http://prometheus:9090
+    access: proxy       # Grafana backend fetches data (not the browser directly)
+    isDefault: true     # This is the default datasource for all dashboards
+    editable: false     # Prevent accidental changes via the UI
+
+    jsonData:
+      # How often Grafana queries Prometheus by default (can be overridden per panel)
+      timeInterval: "15s"
+      # Enables Prometheus query hints in the panel editor
+      exemplarTraceIdDestinations: []

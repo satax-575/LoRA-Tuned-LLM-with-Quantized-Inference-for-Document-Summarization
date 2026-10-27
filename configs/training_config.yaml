@@ -80,7 +80,9 @@ training:
   max_grad_norm: 0.3
   group_by_length: true              # Reduces padding overhead
   dataloader_num_workers: 4
-  report_to: "wandb"
+  # Default to no experiment tracking so training works without a W&B account.
+  # Change to "wandb" and set WANDB_API_KEY in .env to enable full tracking.
+  report_to: "none"
   run_name: "qlora-llama31-8b-cnn-dailymail"
 
 # --- Perplexity-Guided Early Stopping ---

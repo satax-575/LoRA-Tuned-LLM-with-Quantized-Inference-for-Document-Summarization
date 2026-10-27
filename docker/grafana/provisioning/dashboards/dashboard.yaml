@@ -1,0 +1,32 @@
+# ============================================================
+# Grafana Dashboard Provisioning — File-based loader
+#
+# What this file does:
+#   Tells Grafana to scan a folder on disk for dashboard JSON
+#   files and auto-load them. Any .json file dropped into the
+#   configured path becomes a dashboard without any UI clicks.
+#
+# How Grafana finds this file:
+#   docker-compose.yml mounts this directory to:
+#   /etc/grafana/provisioning/dashboards/
+# ============================================================
+
+apiVersion: 1
+
+providers:
+  - name: "QLoRA API Dashboards"
+    # Unique internal ID for this provider
+    orgId: 1
+    # "file" type means Grafana reads dashboards from disk (vs. a database or API)
+    type: file
+    # If the JSON changes on disk, Grafana reloads the dashboard automatically
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: false   # Prevent saving UI edits back to disk (keeps files clean)
+
+    options:
+      # Grafana will scan this path (inside the container) for dashboard JSON files.
+      # The docker-compose volume mount makes our local ./grafana/provisioning/dashboards/
+      # appear at this path inside the container.
+      path: /etc/grafana/provisioning/dashboards
+      foldersFromFilesStructure: false

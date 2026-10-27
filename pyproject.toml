@@ -34,7 +34,7 @@ addopts = "-v --tb=short"
 
 [tool.coverage.run]
 source = ["inference", "training", "data", "evaluation", "quantization"]
-omit = ["tests/*", "setup.py", "conftest.py", "*/migrations/*"]
+omit = ["tests/*", "conftest.py", "*/migrations/*"]
 
 [tool.coverage.report]
 show_missing = true
@@ -45,3 +45,35 @@ exclude_lines = [
     "except ImportError",
     "pass",
 ]
+
+# ── Ruff linter configuration ──────────────────────────────────────────────────
+# ruff is a fast Python linter (replaces flake8 + isort + pyupgrade).
+# These rules are enforced in CI via: ruff check . --output-format=github
+[tool.ruff]
+# Line length: 100 chars is generous enough for ML code with long model/path names.
+line-length = 100
+# Target Python 3.11 — ruff uses this to know which syntax features are valid.
+target-version = "py311"
+
+[tool.ruff.lint]
+# Rule sets we enforce:
+#   E  — pycodestyle errors (indentation, whitespace, syntax)
+#   F  — pyflakes (undefined names, unused imports, unused variables)
+#   W  — pycodestyle warnings
+#   I  — isort (import ordering)
+select = ["E", "F", "W", "I"]
+
+# Rules we explicitly ignore:
+#   E501 — "line too long" — already handled by line-length = 100 above.
+#           ruff reformats via `ruff format`, so we don't need the lint rule too.
+#   F401 — "imported but unused" in __init__.py files — common for public re-exports.
+ignore = ["E501"]
+
+# Don't auto-fix these rules (too risky to auto-change):
+unfixable = ["F841"]  # local variable assigned but never used
+
+[tool.ruff.lint.per-file-ignores]
+# Test files: allow assert statements and unused imports (fixtures imported for side effects)
+"tests/*" = ["F401", "F811"]
+# __init__.py: imports are re-exports, not unused
+"*/__init__.py" = ["F401"]

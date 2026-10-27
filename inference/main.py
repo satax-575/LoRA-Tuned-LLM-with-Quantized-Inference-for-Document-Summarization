@@ -13,6 +13,7 @@ Production features:
   - CORS middleware
 """
 
+import asyncio
 import os
 import time
 import logging
@@ -343,27 +344,39 @@ async def summarize_batch(
     body: BatchSummarizeRequest,
     summarizer: Summarizer = Depends(get_summarizer),
 ) -> BatchSummarizeResponse:
-    """Batch summarization — up to 16 documents per request."""
+    """
+    Batch summarization — up to 16 documents per request.
+
+    Uses asyncio.gather() to submit ALL documents to vLLM concurrently.
+    This is important: with a plain `for` loop + `await`, each document
+    would wait for the previous one to finish (sequential execution).
+    asyncio.gather() fires all coroutines at once so vLLM's continuous
+    batching engine can process them in a single forward pass.
+    """
     global _total_requests
 
     t_start = time.perf_counter()
-    summaries = []
-    cached_count = 0
+    _total_requests += len(body.documents)
 
-    for doc in body.documents:
-        _total_requests += 1
-        result = await summarizer.summarize(
+    # Build one coroutine per document — none have started yet
+    tasks = [
+        summarizer.summarize(
             document=doc,
             max_new_tokens=body.max_length,
             temperature=body.temperature,
             use_cache=body.use_cache,
         )
-        summaries.append(result["summary"])
-        if result["cached"]:
-            cached_count += 1
+        for doc in body.documents
+    ]
+
+    # Fire all coroutines concurrently; wait for the slowest one
+    results = await asyncio.gather(*tasks)
+
+    summaries = [r["summary"] for r in results]
+    cached_count = sum(1 for r in results if r["cached"])
 
     total_latency_ms = (time.perf_counter() - t_start) * 1000
-    record_request("/summarize/batch", "200", total_latency_ms / 1000)
+    record_request("/summarize/batch", "200", (time.perf_counter() - t_start))
 
     return BatchSummarizeResponse(
         summaries=summaries,

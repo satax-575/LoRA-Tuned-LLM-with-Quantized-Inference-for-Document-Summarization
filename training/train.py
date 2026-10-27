@@ -95,15 +95,18 @@ def main():
     else:
         wandb_key = os.environ.get("WANDB_API_KEY")
         if not wandb_key:
+            # No W&B key found — disable silently instead of crashing.
+            # To enable experiment tracking, set WANDB_API_KEY in .env
+            # and change report_to to "wandb" in configs/training_config.yaml.
+            os.environ["WANDB_DISABLED"] = "true"
             console.print(
-                "[bold red]⚠ WANDB_API_KEY not found in environment.[/bold red]\n"
-                "  Set it in .env file: WANDB_API_KEY=your_key_here\n"
-                "  Get your key at: https://wandb.ai/authorize\n"
-                "  Or pass --no-wandb to skip experiment tracking."
+                "[yellow]⚠ WANDB_API_KEY not set — W&B tracking auto-disabled.[/yellow]\n"
+                "  Training will proceed and log to console only.\n"
+                "  To enable: set WANDB_API_KEY in .env and run with W&B enabled."
             )
-            sys.exit(1)
-        wandb.login(key=wandb_key)
-        console.print("[green]✓ Weights & Biases connected[/green]")
+        else:
+            wandb.login(key=wandb_key)
+            console.print("[green]✓ Weights & Biases connected[/green]")
 
     # ── Step 1: Build Dataset ──
     if not args.skip_data_build:

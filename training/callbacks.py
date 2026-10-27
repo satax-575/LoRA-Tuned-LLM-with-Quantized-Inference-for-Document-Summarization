@@ -1,6 +1,13 @@
 """
-Custom Training Callbacks
-Perplexity-guided Early Stopping + W&B Logging + Checkpoint Management
+training/callbacks.py
+
+Custom HuggingFace Trainer callbacks for this QLoRA training run.
+
+We have three of them:
+  - PerplexityEarlyStoppingCallback: monitors validation perplexity and stops
+    training when it plateaus — prevents overfitting on the 50K corpus
+  - TrainingProgressCallback: nice Rich-formatted step logging with loss tracking
+  - ModelCheckpointCallback: logs checkpoint saves so you can find them later
 """
 
 import math
@@ -17,16 +24,15 @@ logger = logging.getLogger(__name__)
 
 class PerplexityEarlyStoppingCallback(TrainerCallback):
     """
-    Perplexity-Guided Early Stopping.
-    
-    Monitors eval_loss and converts to perplexity (exp(loss)).
-    Stops training when perplexity doesn't improve by `threshold`
+    Perplexity-guided early stopping.
+
+    We track eval perplexity (exp(eval_loss)) rather than raw loss because:
+    - Perplexity is more interpretable for LMs ("confused by N words on average")
+    - The exponential scale makes small loss improvements more meaningful
+    - It catches plateau behaviour that's subtle in log-loss space
+
+    We stop when perplexity doesn't improve by more than `threshold` (relative)
     for `patience` consecutive evaluations.
-    
-    Why perplexity-guided vs loss-guided?
-    - Perplexity is more interpretable for language models
-    - Exponential scale makes improvements more meaningful
-    - Helps prevent overfitting on the 50K curated corpus
     """
 
     def __init__(
@@ -110,7 +116,12 @@ class PerplexityEarlyStoppingCallback(TrainerCallback):
 
 
 class TrainingProgressCallback(TrainerCallback):
-    """Rich-formatted training progress with loss curve tracking."""
+    """
+    Rich-formatted training progress logging.
+
+    Prints a compact step summary every `log_every` steps and records loss
+    history so it can be inspected after training (e.g., for plotting).
+    """
 
     def __init__(self, log_every: int = 50):
         self.log_every = log_every
@@ -148,10 +159,13 @@ class TrainingProgressCallback(TrainerCallback):
         **kwargs,
     ):
         eval_loss = metrics.get("eval_loss")
-        if eval_loss:
+        # BUG FIX: `if eval_loss:` is falsy when eval_loss == 0.0.
+        # Use `is not None` so we never silently skip a perfect-zero loss.
+        if eval_loss is not None:
             self.eval_losses.append({
                 "step": state.global_step,
                 "loss": eval_loss,
+                # Cap at 20 before exp() to avoid overflow on bad early losses
                 "perplexity": math.exp(min(eval_loss, 20)),
             })
 
@@ -163,7 +177,12 @@ class TrainingProgressCallback(TrainerCallback):
 
 
 class ModelCheckpointCallback(TrainerCallback):
-    """Logs checkpoint paths with metadata."""
+    """
+    Logs a human-readable message whenever a checkpoint is written.
+
+    Purely cosmetic — HuggingFace handles the actual saving. This just makes
+    it easier to spot checkpoint events in the training log.
+    """
 
     def on_save(
         self,

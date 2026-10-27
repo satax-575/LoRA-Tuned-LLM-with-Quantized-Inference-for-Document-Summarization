@@ -1,14 +1,15 @@
 """
-QLoRA Trainer Setup
-Configures Llama 3.1 8B with QLoRA + SFTTrainer for instruction fine-tuning.
+training/trainer.py
 
-Key fixes vs original:
-  - Removed incompatible DataCollatorForSeq2Seq (conflicts with SFTTrainer)
-  - Added Flash Attention 2 detection with graceful SDPA fallback
-  - Proper SFTTrainer dataset_text_field / formatting_func removed
-    (dataset is pre-tokenized — we pass token IDs directly)
-  - Added `dataset_kwargs={"skip_prepare_dataset": True}` so SFTTrainer
-    does not re-process our already-tokenized + masked dataset
+Sets up the QLoRA fine-tuning run for Llama 3.1 8B on CNN/DailyMail.
+
+A few decisions worth calling out:
+  - We use DataCollatorForLanguageModeling (not DataCollatorForSeq2Seq) because
+    SFTTrainer expects a causal LM setup, not encoder-decoder.
+  - Flash Attention 2 is auto-detected; we fall back to SDPA if it's not available
+    (e.g., on older GPUs or CPU).
+  - dataset_kwargs={"skip_prepare_dataset": True} is critical: without it, SFTTrainer
+    would re-tokenise our already-processed dataset and wipe our -100 label masks.
 """
 
 import os
@@ -49,12 +50,11 @@ logger = logging.getLogger(__name__)
 
 def _detect_attn_implementation() -> str:
     """
-    Detect the best attention implementation available.
+    Pick the best available attention implementation.
 
-    Priority:
-      1. flash_attention_2 — fastest, requires Ampere+ GPU + flash-attn package
-      2. sdpa             — PyTorch 2.0+ scaled dot-product attention (always available)
-      3. eager            — fallback
+    We try Flash Attention 2 first (fastest, needs Ampere+ GPU and flash-attn
+    installed), then fall back to SDPA (built into PyTorch 2.0+), and finally
+    to the plain eager implementation if nothing else works.
     """
     try:
         import flash_attn  # noqa: F401
@@ -75,14 +75,14 @@ def _detect_attn_implementation() -> str:
 
 class QLoRATrainer:
     """
-    Full QLoRA training pipeline for Llama 3.1 8B on CNN/DailyMail.
+    End-to-end QLoRA training pipeline for Llama 3.1 8B on CNN/DailyMail.
 
-    Architecture:
-      - Base: Llama 3.1 8B loaded in 4-bit NF4 via bitsandbytes
-      - Adapter: LoRA rank-16, alpha=32 via PEFT
-      - Trainer: SFTTrainer (TRL) with perplexity early stopping
-      - Optimizer: paged_adamw_8bit (memory-efficient)
-      - Attention: Flash Attention 2 (if available) else SDPA
+    Stack:
+      - Base model: Llama 3.1 8B loaded in 4-bit NF4 via bitsandbytes
+      - Adapter: LoRA rank-16, alpha=32 (scaling=2.0), applied via PEFT
+      - Trainer: SFTTrainer from TRL with perplexity early stopping
+      - Optimizer: paged_adamw_8bit (much lower memory than adamw)
+      - Attention: Flash Attention 2 if available, otherwise SDPA
     """
 
     def __init__(self, config_path: str = "configs/training_config.yaml"):
@@ -94,41 +94,38 @@ class QLoRATrainer:
         self.trainer = None
 
     def load_model_and_tokenizer(self):
-        """Load Llama 3.1 8B in 4-bit NF4 from HuggingFace Hub."""
+        """Download (or load from cache) Llama 3.1 8B and quantize it on the fly."""
         attn_impl = _detect_attn_implementation()
         console.print(
             f"\n[bold cyan]Loading {self.model_name} in 4-bit NF4 "
             f"(attn: {attn_impl})...[/bold cyan]"
         )
 
-        # ── 4-bit NF4 Quantization Config ──
         bnb_config = get_bnb_config(self.cfg)
 
-        # ── Load Base Model (quantized) ──
         self.model = AutoModelForCausalLM.from_pretrained(
             self.model_name,
             quantization_config=bnb_config,
-            device_map="auto",              # Spread across available GPUs/CPU
+            device_map="auto",              # Spread across all available GPUs, then CPU
             trust_remote_code=True,
             token=self.hf_token,
             torch_dtype=torch.bfloat16,
-            attn_implementation=attn_impl, # Flash Attn 2 or SDPA, not hardcoded
+            attn_implementation=attn_impl,
         )
 
-        # ── Prepare for k-bit training (gradient checkpointing + cast) ──
+        # Prepares the frozen quantized layers for training and enables gradient
+        # checkpointing to trade compute for memory during the backward pass.
         self.model = prepare_model_for_kbit_training(
             self.model,
             use_gradient_checkpointing=True,
         )
-        self.model.config.use_cache = False   # Required for gradient checkpointing
+        self.model.config.use_cache = False   # Must be off when using grad checkpointing
 
-        # ── Apply LoRA Adapter ──
         lora_config = get_lora_config(self.cfg)
         self.model = get_peft_model(self.model, lora_config)
 
         print_trainable_params(self.model)
 
-        # ── Tokenizer ──
         self.tokenizer = AutoTokenizer.from_pretrained(
             self.model_name,
             token=self.hf_token,
@@ -137,9 +134,9 @@ class QLoRATrainer:
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
             self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
-        self.tokenizer.padding_side = "right"  # Important for causal LM
+        self.tokenizer.padding_side = "right"  # Right-pad for causal LM training
 
-        console.print("[green]✓ Model and tokenizer loaded[/green]")
+        console.print("[green]\u2713 Model and tokenizer loaded[/green]")
 
     def load_dataset(self, dataset_path: str = "./data/processed"):
         """Load pre-tokenized + label-masked dataset from disk."""
@@ -191,16 +188,15 @@ class QLoRATrainer:
 
     def build_trainer(self, dataset) -> SFTTrainer:
         """
-        Construct SFTTrainer with pre-tokenized dataset.
+        Wire up SFTTrainer with our pre-tokenized dataset.
 
-        Critical: We use `dataset_kwargs={"skip_prepare_dataset": True}` because
-        our dataset is already tokenized and label-masked by CNNDailyMailBuilder.
-        Without this, SFTTrainer would re-process and overwrite our carefully
-        computed -100 label masks.
-
-        DataCollator: DataCollatorForLanguageModeling (not DataCollatorForSeq2Seq)
-        — the Seq2Seq collator is for encoder-decoder models and is incompatible
-        with SFTTrainer's causal LM setup.
+        Two things to know:
+          1. `dataset_kwargs={"skip_prepare_dataset": True}` — our dataset is already
+             tokenized and label-masked (labels=-100 on prompt tokens). Without this flag,
+             SFTTrainer re-tokenises the data and overwrites our masks.
+          2. DataCollatorForLanguageModeling with mlm=False — pads input_ids and
+             correctly propagates the -100 labels. DataCollatorForSeq2Seq is for
+             encoder-decoder models and doesn't work here.
         """
         training_args = self.build_training_args()
 
@@ -215,13 +211,12 @@ class QLoRATrainer:
             ModelCheckpointCallback(),
         ]
 
-        # ── Data Collator ──
-        # DataCollatorForLanguageModeling: pads input_ids and propagates -100 labels
-        # mlm=False → causal LM mode (not masked LM)
+        # DataCollatorForLanguageModeling in causal (mlm=False) mode pads input_ids
+        # and copies labels, preserving the -100 masks we set during preprocessing.
         collator = DataCollatorForLanguageModeling(
             tokenizer=self.tokenizer,
-            mlm=False,          # Causal LM, not masked LM
-            pad_to_multiple_of=8,
+            mlm=False,
+            pad_to_multiple_of=8,  # Slight efficiency gain with tensor cores
         )
 
         self.trainer = SFTTrainer(
